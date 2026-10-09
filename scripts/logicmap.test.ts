@@ -259,6 +259,29 @@ describe('entries against their anchors', () => {
       'misplaced-step src/room.ts:7',
     ])
   })
+
+  test('a step marked (external) on its wrapped second line needs no site', () => {
+    const repoRoot = createFixtureRepo({
+      'src/room.ts': ['// §flow sync.open-document@1 #1', 'const openSocket = () => {}', ''].join(
+        '\n',
+      ),
+      'logicmap/sync.md': [
+        '## sync.open-document',
+        'kind: flow',
+        'version: 1',
+        'what: Opening a document over the socket.',
+        'why: The steps cross the browser and the server.',
+        'source: fixture',
+        'steps:',
+        '  1. The browser opens the socket.',
+        '  2. A teammate follows the emailed link and opens the same document in their own',
+        '     browser. (external)',
+        '',
+      ].join('\n'),
+    })
+
+    expect(describeErrors(repoRoot)).toEqual([])
+  })
 })
 
 describe('lock', () => {
@@ -343,6 +366,57 @@ describe('lock', () => {
     ackIds(repoRoot, ['sync.close-during-join'])
     writeFixtureFiles(repoRoot, { 'src/room.ts': 'const next = 2\n' })
     expect(describeLockProblems(repoRoot)).toEqual(['gone logicmap/lock:2'])
+  })
+
+  test('adding an anchor inside an anchored block does not change that block', () => {
+    const roomLines = [
+      '// §edge sync.close-during-join@1',
+      'if (closedEarly) {',
+      '  joined.removeConnection(connection)',
+      '}',
+      '// §edge sync.pooled-buffer-slice@1',
+      'const data = new Uint8Array(raw.buffer, raw.byteOffset, raw.byteLength)',
+      '',
+    ]
+    const repoRoot = createFixtureRepo({
+      'src/room.ts': roomLines.join('\n'),
+      'logicmap/sync.md': [
+        closeDuringJoinEntry(1),
+        '## sync.pooled-buffer-slice',
+        'kind: edge',
+        'version: 1',
+        'what: ws may hand a message over as a slice of a pooled buffer.',
+        'why: The decoder must read exactly this message.',
+        'source: fixture',
+        '',
+      ].join('\n'),
+    })
+    ackIds(repoRoot, ['sync.close-during-join', 'sync.pooled-buffer-slice'])
+
+    roomLines.splice(2, 0, '  // §uses sync.pooled-buffer-slice@1')
+    writeFixtureFiles(repoRoot, { 'src/room.ts': roomLines.join('\n') })
+    expect(describeLockProblems(repoRoot)).toEqual(['unacked src/room.ts:3'])
+  })
+
+  test('an anchor written as a JSX comment covers the element below it', () => {
+    const appLines = [
+      'export const App = () => (',
+      '  <Routes>',
+      '    {/* §edge sync.close-during-join@1 */}',
+      '    <Route path="/invite" element={<InviteAcceptPage />} />',
+      '  </Routes>',
+      ')',
+      '',
+    ]
+    const repoRoot = createFixtureRepo({
+      'web/App.tsx': appLines.join('\n'),
+      'logicmap/sync.md': closeDuringJoinEntry(1),
+    })
+    ackIds(repoRoot, ['sync.close-during-join'])
+
+    appLines[3] = '    <Route path="/invitation" element={<InviteAcceptPage />} />'
+    writeFixtureFiles(repoRoot, { 'web/App.tsx': appLines.join('\n') })
+    expect(describeLockProblems(repoRoot)).toEqual(['changed web/App.tsx:3'])
   })
 })
 

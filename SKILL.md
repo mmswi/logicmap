@@ -115,6 +115,9 @@ Done when `check` exits 0 and `show <id>` lists every site you meant.
 - `#<step>`: flow anchors only, the number of the step in the entry's `steps:`.
 - Free text after the anchor is a local note about this site.
 - Several anchors can stack above one block, one per comment line.
+- Among JSX children a `//` line is text that renders into the page; write the anchor as a JSX
+  comment there, `{/* §uses teams.invite-link-param-mirrored@1 */}`. Between JSX attributes and in
+  plain code, `//` is fine.
 - `§` followed by a lowercase letter always starts an anchor. Prose that mentions the syntax writes
   `§<role>`; a file that quotes real-looking anchors as examples (docs about the method, articles) is
   listed in `logicmap/ignore`, one git pathspec per line, and is not scanned.

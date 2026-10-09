@@ -276,6 +276,13 @@ const readEntryFields = (
     if (stepNumberText !== undefined) {
       const isExternal = stepText.includes(EXTERNAL_STEP_MARKER)
       steps.push({ number: Number(stepNumberText), text: stepText, isExternal, line })
+      continue
+    }
+    // A wrapped step line belongs to the step above it, so a marker on it counts.
+    const lastStep = currentFieldName === 'steps' ? steps.at(-1) : undefined
+    if (lastStep !== undefined) {
+      lastStep.text = `${lastStep.text} ${continuationText}`
+      lastStep.isExternal = lastStep.text.includes(EXTERNAL_STEP_MARKER)
     }
   }
   return { fieldByName, steps }
@@ -511,16 +518,21 @@ type LockedSite = { version: number; fingerprint: string; line: number }
 
 const ANCHOR_PATTERN_GLOBAL = new RegExp(ANCHOR_SOURCE, 'g')
 
-// Whitespace and anchors are left out, so reformatting a block or moving another pin changes nothing.
+// What is left of a line that held only an anchor: the comment markers it sat between.
+const ANCHOR_RESIDUE_PATTERN = /^(\/\/|#|--|\*|\/\*|\*\/|\/\*\s*\*\/|\{\/\*\s*\*\/\}|<!--\s*-->)?$/
+
+// Whitespace and anchors are left out, so reformatting a block, moving another pin, or adding an
+// anchor inside the block changes nothing.
 const fingerprintLines = (lines: string[]): string => {
   const normalizedText = lines
     .map((line) => line.replace(ANCHOR_PATTERN_GLOBAL, '').replace(/\s+/g, ' ').trim())
-    .filter((line) => line !== '')
+    .filter((line) => !ANCHOR_RESIDUE_PATTERN.test(line))
     .join('\n')
   return createHash('sha256').update(normalizedText).digest('hex').slice(0, 12)
 }
 
-const COMMENT_LINE_PATTERN = /^\s*(\/\/|\/\*|\*|#|--|<!--)/
+// A JSX comment (`{/* ... */}`) counts too: among JSX children it is the only comment that stays one.
+const COMMENT_LINE_PATTERN = /^\s*(\/\/|\/\*|\*|#|--|<!--|\{\/\*)/
 const DECORATOR_LINE_PATTERN = /^\s*@/
 const CLOSING_BRACKET_LINE_PATTERN = /^\s*[)\]}]/
 const OPENS_BLOCK_PATTERN = /[{([]\s*$/
