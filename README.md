@@ -45,7 +45,9 @@ bun ~/.claude/skills/logicmap/scripts/logicmap.ts check              every disag
 bun ~/.claude/skills/logicmap/scripts/logicmap.ts ack <id>...        record that you re-read these rules against their code
 ```
 
-To set it up in a repo, follow "Setting it up in a repo" in `SKILL.md`.
+To set it up in a repo, follow "Setting it up in a repo" in `SKILL.md`. To work a task in a mapped
+repo (a plan whose steps name the rules they touch, decisions recorded when the user makes them),
+follow "Working a task in a mapped repo".
 
 ## Tests
 

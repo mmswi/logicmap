@@ -1,6 +1,6 @@
 ---
 name: logicmap
-description: "Logicmap: `§` anchors in code comments tied to a `logicmap/` ledger of decisions, invariants, edge cases and cross-file flows, plus a checker that flags anchors whose code changed. Use when a repo has a `logicmap/` folder or `§decision` / `§invariant` / `§edge` / `§flow` / `§uses` / `§test` comments (read the map before editing, deleting or explaining that code); when asked to map complex logic, edge cases or flows so agents can follow them and explain why, including in an old codebase where nothing records the reasons; or when setting the method up in a repo."
+description: "Logicmap: `§` anchors in code comments tied to a `logicmap/` ledger of decisions, invariants, edge cases and cross-file flows, plus a checker that flags anchors whose code changed. Use when a repo has a `logicmap/` folder or `§decision` / `§invariant` / `§edge` / `§flow` / `§uses` / `§test` comments (read the map before editing, deleting or explaining that code, and plan each task against it); when asked to map complex logic, edge cases or flows so agents can follow them and explain why, including in an old codebase where nothing records the reasons; or when setting the method up in a repo."
 ---
 
 # Logicmap
@@ -160,6 +160,74 @@ history:
   this repo (a user clicking an email link).
 - A line indented under a field continues it. The file is `logicmap/<domain>.md`; the heading is the id.
 
+## Working a task in a mapped repo
+
+A task (a feature step, a bug fix, a refactor) can outlive the session that starts it: the session
+ends or its context is compacted, and the next agent starts with nothing. So the task's state lives in
+a plan file in the repo, and the plan names the rules each step touches.
+
+1. **Plan before code.** Read the code the task touches, then write the plan where the repo's agent
+   instructions say; when they name no place, `plans/<NN>-<task-slug>.md` at the repo root. Never in
+   `logicmap/`: every `logicmap/*.md` is read as a ledger file. The plan holds the goal (what the user
+   asked, in their words, with the date), numbered steps, and empty `Decisions` and `Revisions`
+   sections. Under each step: checkbox sub-steps, one change you can name each; the files it touches;
+   its rules (next point).
+   Done when every change the task needs has a sub-step and every rule it touches is named in a step.
+2. **Map each step to its rules.** For each file a step touches, run `show <file>`, then `show <id>`
+   for each id in the region the step edits. List them under the step by what the step does to them:
+   - `relies on`: the step must keep the rule true;
+   - `touches`: code under its anchors changes, and `check` will ask whether the rule still holds.
+     When the plan already knows the meaning changes, write `changes <id>@N → @N+1` and list the other
+     sites `show <id>` prints: the step re-verifies each one;
+   - `creates`: a new rule; pick its id and kind now;
+   - `retires`: logic the step deletes.
+
+   A rule the step relies on that has no entry yet gets a sub-step that maps it. A plan writes ids,
+   never anchors (`access.not-found-not-forbidden@1`, not the `§<role>` form): outside `logicmap/`, a
+   `§` followed by a lowercase letter is scanned as an anchor unless its file is in `logicmap/ignore`.
+3. **Record a decision when the user makes it.** When the user chooses between alternatives, in chat
+   or by answering a question, add it to the plan's `Decisions` at once: the choice, the alternative
+   rejected and why, in their words, with who and when. Its `decision` entry is written in the same
+   change as the code that implements it, with `why` and `rejected` from the plan and `source:
+   confirmed by <name> <date>`. It cannot land earlier: an entry with no anchor fails `check`
+   (`orphan-entry`).
+4. **Work one step at a time.** The change that creates or changes a rule writes or updates its entry
+   and anchors in that same change. Run `check`, resolve every line, tick the sub-step. Keep where the
+   step stands in the plan as it changes (done; half-done and what is left; blocked and on what), not
+   only at the end.
+5. **Revise the plan when a finding changes it.** A finding that changes a step (yours, a review's, a
+   failing test's) changes the plan before more code: edit the steps and their rules, and add a
+   `Revisions` line with the date, what changed, the finding and who found it.
+6. **Close.** `check` exits 0 and every sub-step is ticked or moved by a revision; then commit by the
+   repo's rules.
+
+Resuming a task: read its plan, then `show <id>` for each id it names, then `check`. The first step
+with an unticked sub-step is where the work stands.
+
+```markdown
+# Viewers may rename a document
+
+## Goal
+<name>, 2026-10-14: "viewers should be able to rename a document, not edit it"
+
+## Steps
+### 1. A rename right separate from the edit right
+- [ ] canRenameDocument, true for every access that can read
+- [ ] PATCH /documents/:id asks canRenameDocument; the socket keeps canEditDocument
+Files: src/documents/access.ts, src/documents/routes.ts
+Rules:
+- changes access.rest-and-ws-share-resolver@1 → @2 (rename stops sharing the socket's rule);
+  re-verify src/sync/ws-routes.ts:45, src/sync/ws-routes.ts:67, src/sync/sync.test.ts:343
+- relies on access.not-found-not-forbidden@1
+- creates access.rename-open-to-readers (decision)
+
+## Decisions
+- 2026-10-14, <name>: rename gets its own rule; loosening canEditDocument was rejected because
+  viewers would also edit the content over the socket
+
+## Revisions
+```
+
 ## Setting it up in a repo
 
 1. Create `logicmap/` and map the 3 to 10 places agents most often get wrong: the cross-file rules,
@@ -181,6 +249,9 @@ history:
      reports as `stale-pin`, move those pins, and ack.
    - Roles: `decision`, `invariant`, `edge`, `flow` define a rule; `uses`, `test` point at one. Files
      that only talk about anchors go in `logicmap/ignore`. The full method: the `logicmap` skill.
+   - A task starts with a plan file (in `plans/` unless this file names another place): numbered
+     steps, each listing the logicmap ids it relies on, changes, creates or retires. A decision the
+     user makes goes into the plan at once, and into its entry with the code that implements it.
    - An entry whose `source:` starts with `inferred` is an agent's reading of the code, not a recorded
      decision: when you repeat its why, say it is inferred and cite the evidence.
    ```
