@@ -12,8 +12,10 @@ records exactly that knowledge and ties it to the code with three parts:
 - **anchors**: one-line comment markers, `§<role> <id>@<version>`, at every site that defines or relies
   on a piece of knowledge. One id, grepped, returns every anchored site;
 - **ledger**: `logicmap/<domain>.md`, one entry per id: what holds, why, what was rejected, what breaks;
-- **lock**: `logicmap/lock`, a fingerprint of the code under every anchor and of every entry, so the
-  checker knows when code changed under a rationale nobody re-read.
+- **lock**: `logicmap/<domain>.lock` beside each ledger file, a fingerprint of the code under every
+  anchor and of every entry, so the checker knows when code changed under a rationale nobody re-read.
+  Only `ack` writes it, and an ack rewrites only the lock of its own domain. A repo with the single
+  `logicmap/lock` of earlier versions is read as is, and split by its next ack.
 
 The checker, run from anywhere inside the repo:
 

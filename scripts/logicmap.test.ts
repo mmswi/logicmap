@@ -1,6 +1,14 @@
 import { afterAll, describe, expect, test } from 'bun:test'
 import { execFileSync } from 'node:child_process'
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import {
@@ -30,6 +38,15 @@ const writeFixtureFiles = (repoRoot: string, contentByPath: Record<string, strin
     writeFileSync(absolutePath, content)
   }
 }
+
+const readFixtureFile = (repoRoot: string, relativePath: string): string =>
+  readFileSync(join(repoRoot, relativePath), 'utf8')
+
+// The lock files in the fixture's logicmap/: each <domain>.lock, and the old single `lock`.
+const listFixtureLockFileNames = (repoRoot: string): string[] =>
+  readdirSync(join(repoRoot, 'logicmap'))
+    .filter((fileName) => fileName === 'lock' || fileName.endsWith('.lock'))
+    .sort()
 
 const LOCK_PROBLEM_CODES: readonly string[] = [
   PROBLEM_CODES.unacked,
@@ -365,7 +382,7 @@ describe('lock', () => {
 
     ackIds(repoRoot, ['sync.close-during-join'])
     writeFixtureFiles(repoRoot, { 'src/room.ts': 'const next = 2\n' })
-    expect(describeLockProblems(repoRoot)).toEqual(['gone logicmap/lock:2'])
+    expect(describeLockProblems(repoRoot)).toEqual(['gone logicmap/sync.lock:2'])
   })
 
   test('adding an anchor inside an anchored block does not change that block', () => {
@@ -417,6 +434,61 @@ describe('lock', () => {
     appLines[3] = '    <Route path="/invitation" element={<InviteAcceptPage />} />'
     writeFixtureFiles(repoRoot, { 'web/App.tsx': appLines.join('\n') })
     expect(describeLockProblems(repoRoot)).toEqual(['changed web/App.tsx:3'])
+  })
+
+  test("each domain has its own lock: an ack leaves another domain's lock file as it was", () => {
+    const repoRoot = createFixtureRepo({
+      'src/room.ts': [
+        '// §edge sync.close-during-join@1',
+        'const undoJoin = () => {}',
+        '// §decision access.not-found-not-forbidden@1',
+        'const notFoundStatus = 404',
+        '',
+      ].join('\n'),
+      'logicmap/sync.md': closeDuringJoinEntry(1),
+      'logicmap/access.md': [
+        '## access.not-found-not-forbidden',
+        'kind: decision',
+        'version: 1',
+        'what: No path to a resource answers 404.',
+        'why: A 403 would confirm the resource exists.',
+        'source: fixture',
+        '',
+      ].join('\n'),
+    })
+    ackIds(repoRoot, ['sync.close-during-join', 'access.not-found-not-forbidden'])
+    const accessLockAfterFirstAck = readFixtureFile(repoRoot, 'logicmap/access.lock')
+
+    const editedEntry = closeDuringJoinEntry(1).replace('before it resolves', 'before it loads')
+    writeFixtureFiles(repoRoot, { 'logicmap/sync.md': editedEntry })
+    ackIds(repoRoot, ['sync.close-during-join'])
+
+    expect(readFixtureFile(repoRoot, 'logicmap/access.lock')).toBe(accessLockAfterFirstAck)
+    expect(describeLockProblems(repoRoot)).toEqual([])
+  })
+
+  test('ack deletes a lock file no line belongs to: the old single lock, a domain with nothing left', () => {
+    const repoRoot = createFixtureRepo({
+      'src/room.ts': ['// §edge sync.close-during-join@1', 'const undoJoin = () => {}', ''].join(
+        '\n',
+      ),
+      'logicmap/sync.md': closeDuringJoinEntry(1),
+    })
+    ackIds(repoRoot, ['sync.close-during-join'])
+    // A repo mapped before the split: the same lines, in the one file the old checker wrote.
+    renameSync(join(repoRoot, 'logicmap/sync.lock'), join(repoRoot, 'logicmap/lock'))
+    expect(describeLockProblems(repoRoot)).toEqual([])
+
+    ackIds(repoRoot, ['sync.close-during-join'])
+    expect(listFixtureLockFileNames(repoRoot)).toEqual(['sync.lock'])
+
+    writeFixtureFiles(repoRoot, {
+      'src/room.ts': 'const undoJoin = () => {}\n',
+      'logicmap/sync.md': '',
+    })
+    ackIds(repoRoot, ['sync.close-during-join'])
+    expect(listFixtureLockFileNames(repoRoot)).toEqual([])
+    expect(describeLockProblems(repoRoot)).toEqual([])
   })
 })
 

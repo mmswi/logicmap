@@ -1,6 +1,6 @@
 import { execFileSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { existsSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
+import { existsSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { basename, join, relative, resolve, sep } from 'node:path'
 
 /*
@@ -102,7 +102,9 @@ export type LedgerEntry = {
 }
 
 const LEDGER_DIRECTORY = 'logicmap'
-const LOCK_FILE = `${LEDGER_DIRECTORY}/lock`
+const LEDGER_FILE_EXTENSION = '.md'
+const LOCK_FILE_EXTENSION = '.lock'
+const SINGLE_LOCK_FILE_BEFORE_SPLIT = `${LEDGER_DIRECTORY}/lock`
 const IGNORE_FILE = `${LEDGER_DIRECTORY}/ignore`
 
 const ANCHOR_ROLE_NAMES: readonly string[] = Object.values(ANCHOR_ROLES)
@@ -371,21 +373,25 @@ const parseEntry = (entryBlock: EntryBlock): { entry: LedgerEntry; problems: Pro
   }
 }
 
+// The files in logicmap/ with this extension, as repo-relative paths in name order.
+const listLedgerDirectoryFiles = (repoRoot: string, extension: string): string[] => {
+  const ledgerPath = join(repoRoot, LEDGER_DIRECTORY)
+  if (!existsSync(ledgerPath)) {
+    return []
+  }
+  return readdirSync(ledgerPath)
+    .filter((fileName) => fileName.endsWith(extension))
+    .sort()
+    .map((fileName) => `${LEDGER_DIRECTORY}/${fileName}`)
+}
+
 const readLedger = (
   repoRoot: string,
 ): { entriesById: Map<string, LedgerEntry>; problems: Problem[] } => {
   const entriesById = new Map<string, LedgerEntry>()
   const problems: Problem[] = []
-  const ledgerPath = join(repoRoot, LEDGER_DIRECTORY)
-  if (!existsSync(ledgerPath)) {
-    return { entriesById, problems }
-  }
-  const ledgerFileNames = readdirSync(ledgerPath)
-    .filter((fileName) => fileName.endsWith('.md'))
-    .sort()
-  for (const ledgerFileName of ledgerFileNames) {
-    const file = `${LEDGER_DIRECTORY}/${ledgerFileName}`
-    const fileText = readFileSync(join(ledgerPath, ledgerFileName), 'utf8')
+  for (const file of listLedgerDirectoryFiles(repoRoot, LEDGER_FILE_EXTENSION)) {
+    const fileText = readFileSync(join(repoRoot, file), 'utf8')
     for (const entryBlock of splitIntoEntryBlocks(file, fileText)) {
       const { entry, problems: entryProblems } = parseEntry(entryBlock)
       problems.push(...entryProblems)
@@ -514,7 +520,7 @@ type LockSite = {
   label: string
 }
 
-type LockedSite = { version: number; fingerprint: string; line: number }
+type LockedSite = { version: number; fingerprint: string; file: string; line: number }
 
 const ANCHOR_PATTERN_GLOBAL = new RegExp(ANCHOR_SOURCE, 'g')
 
@@ -640,22 +646,35 @@ const collectLockSites = (
 
 const idOfLockKey = (key: string): string => key.split(' ')[0] ?? key
 
+// One lock per domain, beside its ledger file (logicmap/sync.lock next to logicmap/sync.md), so an
+// ack rewrites only the lock of the domain it touched.
+const lockFileOf = (id: string): string =>
+  `${LEDGER_DIRECTORY}/${domainOf(id)}${LOCK_FILE_EXTENSION}`
+
+// A repo mapped before the split keeps its single logicmap/lock until the next ack splits it. It is
+// listed first, so for a key in both, the domain file read after it wins.
+const listLockFiles = (repoRoot: string): string[] => {
+  const domainLockFiles = listLedgerDirectoryFiles(repoRoot, LOCK_FILE_EXTENSION)
+  const hasSingleLockFile = existsSync(join(repoRoot, SINGLE_LOCK_FILE_BEFORE_SPLIT))
+  return hasSingleLockFile ? [SINGLE_LOCK_FILE_BEFORE_SPLIT, ...domainLockFiles] : domainLockFiles
+}
+
 // A lock line is "<key> <version> <fingerprint>"; the key may hold spaces (a path), so parse from the end.
 const readLock = (repoRoot: string): Map<string, LockedSite> => {
   const lockedSitesByKey = new Map<string, LockedSite>()
-  const lockPath = join(repoRoot, LOCK_FILE)
-  if (!existsSync(lockPath)) {
-    return lockedSitesByKey
-  }
-  for (const [lineIndex, lockLine] of readFileSync(lockPath, 'utf8').split('\n').entries()) {
-    const isRecordLine = lockLine !== '' && !lockLine.startsWith('#')
-    if (!isRecordLine) {
-      continue
+  for (const lockFile of listLockFiles(repoRoot)) {
+    const lockLines = readFileSync(join(repoRoot, lockFile), 'utf8').split('\n')
+    for (const [lineIndex, lockLine] of lockLines.entries()) {
+      const isRecordLine = lockLine !== '' && !lockLine.startsWith('#')
+      if (!isRecordLine) {
+        continue
+      }
+      const lockLineParts = lockLine.split(' ')
+      const fingerprint = lockLineParts.pop() ?? ''
+      const version = Number(lockLineParts.pop())
+      const line = lineIndex + 1
+      lockedSitesByKey.set(lockLineParts.join(' '), { version, fingerprint, file: lockFile, line })
     }
-    const lockLineParts = lockLine.split(' ')
-    const fingerprint = lockLineParts.pop() ?? ''
-    const version = Number(lockLineParts.pop())
-    lockedSitesByKey.set(lockLineParts.join(' '), { version, fingerprint, line: lineIndex + 1 })
   }
   return lockedSitesByKey
 }
@@ -681,9 +700,7 @@ const checkLock = (lockSites: LockSite[], lockedSitesByKey: Map<string, LockedSi
     if (!currentKeys.has(key)) {
       const id = idOfLockKey(key)
       const message = `${key} is gone since the last ack: ack ${id} to drop it`
-      problems.push(
-        errorAt(PROBLEM_CODES.gone, { file: LOCK_FILE, line: lockedSite.line }, id, message),
-      )
+      problems.push(errorAt(PROBLEM_CODES.gone, lockedSite, id, message))
     }
   }
   return problems
@@ -760,7 +777,7 @@ export const ackIds = (
     if (!isKnownId) {
       const message = `${id} is not an anchor, an entry or a lock line`
       blockingProblems.push(
-        errorAt(PROBLEM_CODES.unknownId, { file: LOCK_FILE, line: 0 }, id, message),
+        errorAt(PROBLEM_CODES.unknownId, { file: lockFileOf(id), line: 0 }, id, message),
       )
     }
   }
@@ -775,7 +792,19 @@ export const ackIds = (
     .filter((lockSite) => requestedIds.has(lockSite.id))
     .map((lockSite) => `${lockSite.key} ${lockSite.version} ${lockSite.fingerprint}`)
   const lockLines = [...keptLockLines, ...ackedLockLines].sort()
-  writeFileSync(join(repoRoot, LOCK_FILE), `${[LOCK_HEADER, ...lockLines].join('\n')}\n`)
+  // A lock line starts with its key, and a key with its id.
+  const lockLinesByFile = Map.groupBy(lockLines, (lockLine) => lockFileOf(idOfLockKey(lockLine)))
+  for (const [lockFile, domainLockLines] of lockLinesByFile) {
+    writeFileSync(join(repoRoot, lockFile), `${[LOCK_HEADER, ...domainLockLines].join('\n')}\n`)
+  }
+  // The single lock from before the split, or a domain whose entries were all deleted: left on disk,
+  // its old lines would be read back as `gone`.
+  for (const lockFile of listLockFiles(repoRoot)) {
+    const holdsNoLockLine = !lockLinesByFile.has(lockFile)
+    if (holdsNoLockLine) {
+      rmSync(join(repoRoot, lockFile))
+    }
+  }
   return { ackedIds: [...requestedIds], blockingProblems: [] }
 }
 
