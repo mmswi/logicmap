@@ -46,8 +46,8 @@ bun ~/.claude/skills/logicmap/scripts/logicmap.ts ack <id>...        record that
 ```
 
 To set it up in a repo, follow "Setting it up in a repo" in `SKILL.md`. To work a task in a mapped
-repo (a plan whose steps name the rules they touch, decisions recorded when the user makes them),
-follow "Working a task in a mapped repo".
+repo (a plan whose steps name the rules they touch, decisions recorded when the user makes them, each
+piece of code recorded with the reason it was written), follow "Working a task in a mapped repo".
 
 ## Tests
 

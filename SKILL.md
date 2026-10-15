@@ -43,7 +43,9 @@ bun ~/.claude/skills/logicmap/scripts/logicmap.ts show [<id> | <file>]
      fact; give the why as inferred, with the evidence its `source` cites.
    - `changed`, `unacked` or `stale-pin`: code moved since anyone re-read the entry. Present the why as
      the recorded rationale, re-derive the behaviour from the code, and repair the map (next section).
-   - no anchor: derive from the code and `git log`, and say the reason is inferred.
+   - no anchor: look for the piece recorded with the line's commit (`git blame`, then the step doc in
+     that commit; see "Working a task in a mapped repo"). It gives the reason the code was written, as
+     of that commit. Without one, derive from the code and `git log`, and say the reason is inferred.
 
    An entry is a claim even when `ok`: the fingerprint proves the code has not moved since the last
    ack, not that the entry was right. When the code contradicts the entry, describe what the code
@@ -166,9 +168,10 @@ A task (a feature step, a bug fix, a refactor) can outlive the session that star
 ends or its context is compacted, and the next agent starts with nothing. So the task's state lives in
 a plan file in the repo, and the plan names the rules each step touches.
 
-1. **Plan before code.** Read the code the task touches, then write the plan where the repo's agent
-   instructions say; when they name no place, `plans/<NN>-<task-slug>.md` at the repo root. Never in
-   `logicmap/`: every `logicmap/*.md` is read as a ledger file. The plan holds the goal (what the user
+1. **Plan before code.** Read the code the task touches, then write the plan. A task is a folder, where
+   the repo's agent instructions say; when they name no place, `plans/<NN>-<task-slug>/` at the repo
+   root, holding `00-plan.md` and one doc per step (step 5). Never in `logicmap/`: every
+   `logicmap/*.md` is read as a ledger file. The plan holds the goal (what the user
    asked, in their words, with the date), numbered steps, and empty `Decisions` and `Revisions`
    sections. Under each step: checkbox sub-steps, one change you can name each; the files it touches;
    its rules (next point).
@@ -195,14 +198,43 @@ a plan file in the repo, and the plan names the rules each step touches.
    and anchors in that same change. Run `check`, resolve every line, tick the sub-step. Keep where the
    step stands in the plan as it changes (done; half-done and what is left; blocked and on what), not
    only at the end.
-5. **Revise the plan when a finding changes it.** A finding that changes a step (yours, a review's, a
+5. **Record each piece as you write it.** A piece is one function, or one piece of logic inside a
+   function: a query, a changed return value, a rename across its call sites. Before writing it,
+   append its entry to the step's doc (`<NN>-<step-slug>.md` beside the plan), then write exactly that
+   code:
+
+   ````markdown
+   ## Piece 2: the rename route asks canRenameDocument
+   What: PATCH /documents/:id checks canRenameDocument instead of canEditDocument.
+   Why: viewers may rename but not edit. The socket's write flag keeps canEditDocument, so loosening
+     canEditDocument (rejected) would let viewers edit the content over the socket.
+   Where: src/documents/routes.ts:233
+   ```diff
+   -    if (!canEditDocument(resolved.access)) {
+   +    if (!canRenameDocument(resolved.access)) {
+   ```
+   ````
+
+   `Why` says what the piece solves, and names the alternative not taken when there was one. Add to
+   the entry what happened while writing it: a deviation from the code shown, the output of the run
+   that confirmed it. Commit the entry in the same commit as its code: that is what lets `git blame`
+   on any line lead to the reason it was written (below).
+6. **Revise the plan when a finding changes it.** A finding that changes a step (yours, a review's, a
    failing test's) changes the plan before more code: edit the steps and their rules, and add a
    `Revisions` line with the date, what changed, the finding and who found it.
-6. **Close.** `check` exits 0 and every sub-step is ticked or moved by a revision; then commit by the
+7. **Close.** `check` exits 0 and every sub-step is ticked or moved by a revision; then commit by the
    repo's rules.
 
 Resuming a task: read its plan, then `show <id>` for each id it names, then `check`. The first step
 with an unticked sub-step is where the work stands.
+
+Why a line was written, and what it was meant to solve: `git blame -L <n>,<n> <file>` gives the
+commit; the commit's files include the step doc written with it; the piece in that doc that names the
+function or the file is the reason, as the agent that wrote the line recorded it. A piece describes the
+code as of its commit: compare it with the code today before repeating it. What must hold now is the
+logicmap entry, when the line has one.
+
+The plan of the task that piece 2 above belongs to, `plans/03-viewers-may-rename/00-plan.md`:
 
 ```markdown
 # Viewers may rename a document
@@ -249,9 +281,11 @@ Rules:
      reports as `stale-pin`, move those pins, and ack.
    - Roles: `decision`, `invariant`, `edge`, `flow` define a rule; `uses`, `test` point at one. Files
      that only talk about anchors go in `logicmap/ignore`. The full method: the `logicmap` skill.
-   - A task starts with a plan file (in `plans/` unless this file names another place): numbered
-     steps, each listing the logicmap ids it relies on, changes, creates or retires. A decision the
-     user makes goes into the plan at once, and into its entry with the code that implements it.
+   - A task starts with a plan (in `plans/<NN>-<task-slug>/` unless this file names another place):
+     numbered steps, each listing the logicmap ids it relies on, changes, creates or retires. A
+     decision the user makes goes into the plan at once, and into its entry with the code that
+     implements it. Each piece of code is recorded in its step's doc (`## Piece N`: what, why, where,
+     the code) and committed with it, so `git blame` leads from a line to why it was written.
    - An entry whose `source:` starts with `inferred` is an agent's reading of the code, not a recorded
      decision: when you repeat its why, say it is inferred and cite the evidence.
    ```
