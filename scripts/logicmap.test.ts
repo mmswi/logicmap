@@ -11,6 +11,7 @@ import {
 } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
+import { respondToHook } from './hook.ts'
 import {
   PROBLEM_CODES,
   PROBLEM_SEVERITIES,
@@ -467,6 +468,36 @@ describe('lock', () => {
     expect(describeLockProblems(repoRoot)).toEqual([])
   })
 
+  test("an ack writes only its own domains' lock files: another session's edit to another lock stays", () => {
+    const repoRoot = createFixtureRepo({
+      'src/room.ts': [
+        '// §edge sync.close-during-join@1',
+        'const undoJoin = () => {}',
+        '// §decision access.not-found-not-forbidden@1',
+        'const notFoundStatus = 404',
+        '',
+      ].join('\n'),
+      'logicmap/sync.md': closeDuringJoinEntry(1),
+      'logicmap/access.md': [
+        '## access.not-found-not-forbidden',
+        'kind: decision',
+        'version: 1',
+        'what: No path to a resource answers 404.',
+        'why: A 403 would confirm the resource exists.',
+        'source: fixture',
+        '',
+      ].join('\n'),
+    })
+    ackIds(repoRoot, ['sync.close-during-join', 'access.not-found-not-forbidden'])
+    // What another session's ack, landing in between, leaves in access.lock.
+    const accessLockWithNote = `${readFixtureFile(repoRoot, 'logicmap/access.lock')}# acked by another session\n`
+    writeFixtureFiles(repoRoot, { 'logicmap/access.lock': accessLockWithNote })
+
+    ackIds(repoRoot, ['sync.close-during-join'])
+
+    expect(readFixtureFile(repoRoot, 'logicmap/access.lock')).toBe(accessLockWithNote)
+  })
+
   test('ack deletes a lock file no line belongs to: the old single lock, a domain with nothing left', () => {
     const repoRoot = createFixtureRepo({
       'src/room.ts': ['// §edge sync.close-during-join@1', 'const undoJoin = () => {}', ''].join(
@@ -556,19 +587,81 @@ describe('show', () => {
 
     const idView = showLogicMap(repoRoot, 'sync.open-document')
     expect(idView).toContain('what: Opening a document over the socket.')
-    expect(idView).toContain('web/sync-provider.ts:1  §flow sync.open-document@1 #1  ok')
-    expect(idView).toContain('src/ws-routes.ts:1  §flow sync.open-document@1 #2  ok')
+    expect(idView).toContain('web/sync-provider.ts:1-2  §flow sync.open-document@1 #1  ok')
+    expect(idView).toContain('src/ws-routes.ts:1-2  §flow sync.open-document@1 #2  ok')
     expect(idView.indexOf('web/sync-provider.ts:1')).toBeLessThan(
       idView.indexOf('src/ws-routes.ts:1'),
     )
 
-    const fileView = showLogicMap(repoRoot, 'src/ws-routes.ts')
-    expect(fileView).toContain(
-      'src/ws-routes.ts:1  §flow sync.open-document@1 #2  ok  recorded  Opening a document over the socket.',
+    expect(showLogicMap(repoRoot, 'src/ws-routes.ts')).toEqual(
+      [
+        'sync.open-document@1  flow  recorded  Opening a document over the socket.',
+        '  1-2  §flow #2  ok',
+      ].join('\n'),
     )
+  })
 
-    expect(showLogicMap(repoRoot, undefined)).toContain(
-      'sync.open-document@1  flow  ok  recorded  Opening a document over the socket.  (sites: 2)',
+  test('with no target, show maps the domains: each intro and its rule ids; a domain lists its rules with their claims', () => {
+    const repoRoot = createFixtureRepo({
+      'src/room.ts': [
+        '// §decision sync.rooms-per-document@1',
+        'const roomsByDocumentId = new Map()',
+        '// §decision access.not-found-not-forbidden@1',
+        'const notFoundStatus = 404',
+        '',
+      ].join('\n'),
+      'logicmap/sync.md': [
+        '# sync',
+        '',
+        'The live document sync: the socket, the rooms and the snapshots.',
+        'Code: src/sync/.',
+        '',
+        '## sync.rooms-per-document',
+        'kind: decision',
+        'version: 1',
+        'what: One room per open document. The room holds the live Y.Doc and every socket on it.',
+        'why: fixture.',
+        'source: fixture',
+        '',
+        '## sync.old-rule',
+        'kind: decision',
+        'version: 1',
+        'status: retired',
+        'what: An old rule.',
+        'why: fixture.',
+        'source: inferred — fixture',
+        '',
+      ].join('\n'),
+      'logicmap/access.md': [
+        '## access.not-found-not-forbidden',
+        'kind: decision',
+        'version: 1',
+        'what: No path to a resource answers 404.',
+        'why: fixture.',
+        'source: inferred — fixture',
+        '',
+      ].join('\n'),
+    })
+    ackIds(repoRoot, ['sync.rooms-per-document', 'access.not-found-not-forbidden', 'sync.old-rule'])
+
+    expect(showLogicMap(repoRoot, undefined)).toEqual(
+      [
+        'logicmap: 2 rules in 2 domains. show <domain>: its rules and their claims; show <id>: one rule and its sites; show <file>[:<line>[-<line>]]: the rules in a file.',
+        '',
+        'access  1 rule  logicmap/access.md',
+        '  access.not-found-not-forbidden  decision  inferred',
+        '',
+        'sync  1 rule (+1 retired)  logicmap/sync.md',
+        '  The live document sync: the socket, the rooms and the snapshots. Code: src/sync/.',
+        '  sync.rooms-per-document  decision',
+      ].join('\n'),
+    )
+    expect(showLogicMap(repoRoot, 'sync')).toEqual(
+      [
+        'sync  1 rule (+1 retired)  logicmap/sync.md',
+        '  The live document sync: the socket, the rooms and the snapshots. Code: src/sync/.',
+        'sync.rooms-per-document@1  decision  ok  recorded  One room per open document.  (sites: 1)',
+      ].join('\n'),
     )
   })
 })
@@ -603,10 +696,173 @@ describe('provenance', () => {
     })
 
     expect(describeErrors(repoRoot)).toEqual(['missing-field logicmap/billing.md:8'])
-    const fileView = showLogicMap(repoRoot, 'src/billing.ts')
-    expect(fileView).toContain(
-      '§edge billing.retry-skips-weekends@1  unacked  inferred  A retry that falls on a weekend moves to Monday.',
+    expect(showLogicMap(repoRoot, 'src/billing.ts')).toEqual(
+      [
+        'billing.retry-skips-weekends@1  edge  inferred  A retry that falls on a weekend moves to Monday.',
+        '  1-4  §edge  unacked',
+        'billing.charge-in-cents@1  decision  unsourced  Amounts are integers in cents.',
+        '  5-6  §decision  unacked',
+      ].join('\n'),
     )
-    expect(fileView).toContain('§decision billing.charge-in-cents@1  unacked  unsourced')
+  })
+})
+
+describe('covered ranges', () => {
+  test('a file lists each rule once with the lines each site covers; file:line keeps the rules covering it', () => {
+    const repoRoot = createFixtureRepo({
+      'src/room.ts': [
+        'export const joinSocket = () => {',
+        '  // §edge sync.close-during-join@1',
+        '  if (closedEarly) {',
+        '    joined.removeConnection(connection)',
+        '    return',
+        '  }',
+        '  // §uses sync.close-during-join@1',
+        '  flushPending()',
+        '}',
+        '',
+      ].join('\n'),
+      'src/plain.ts': 'export const plain = 1\n',
+      'logicmap/sync.md': closeDuringJoinEntry(1),
+    })
+    ackIds(repoRoot, ['sync.close-during-join'])
+    const ruleLine =
+      'sync.close-during-join@1  edge  recorded  The socket can close while the join is loading.'
+
+    expect(showLogicMap(repoRoot, 'src/room.ts')).toEqual(
+      [ruleLine, '  2-6  §edge  ok', '  7-8  §uses  ok'].join('\n'),
+    )
+    expect(showLogicMap(repoRoot, 'src/room.ts:4')).toEqual(
+      [ruleLine, '  2-6  §edge  ok'].join('\n'),
+    )
+    expect(showLogicMap(repoRoot, 'src/room.ts:6-7')).toEqual(
+      [ruleLine, '  2-6  §edge  ok', '  7-8  §uses  ok'].join('\n'),
+    )
+    expect(showLogicMap(repoRoot, 'src/room.ts:9')).toEqual(
+      'src/room.ts:9: no rule covers these lines',
+    )
+    expect(showLogicMap(repoRoot, 'src/plain.ts')).toEqual(
+      'src/plain.ts has no anchors: no rule in the map is defined or used in it',
+    )
+  })
+})
+
+describe('claims', () => {
+  test('a what that opens with a sentence over 200 characters warns long-what; detail after a short claim does not', () => {
+    const longFirstSentence = `The socket can close while the join is loading${', and the room keeps it'.repeat(8)}.`
+    const shortClaimThenDetail = `The socket can close while the join is loading. ${longFirstSentence}`
+    const decisionEntry = (id: string, what: string, statusLines: string[]): string =>
+      [
+        `## ${id}`,
+        'kind: decision',
+        'version: 1',
+        ...statusLines,
+        `what: ${what}`,
+        'why: fixture.',
+        'source: fixture',
+        '',
+      ].join('\n')
+    const repoRoot = createFixtureRepo({
+      'src/room.ts': [
+        '// §decision sync.long-claim@1',
+        'const first = 1',
+        '// §decision sync.short-claim@1',
+        'const second = 2',
+        '',
+      ].join('\n'),
+      'logicmap/sync.md': [
+        decisionEntry('sync.long-claim', longFirstSentence, []),
+        decisionEntry('sync.short-claim', shortClaimThenDetail, []),
+        decisionEntry('sync.retired-claim', longFirstSentence, ['status: retired']),
+      ].join('\n'),
+    })
+
+    expect(describeWarnings(repoRoot)).toEqual(['long-what logicmap/sync.md:4'])
+  })
+})
+
+describe('hook', () => {
+  const createMappedRepo = (): string => {
+    const repoRoot = createFixtureRepo({
+      'src/room.ts': [
+        'export const joinSocket = () => {',
+        '  // §edge sync.close-during-join@1',
+        '  if (closedEarly) {',
+        '    joined.removeConnection(connection)',
+        '  }',
+        '  flushPending()',
+        '}',
+        '',
+      ].join('\n'),
+      'logicmap/sync.md': closeDuringJoinEntry(1),
+    })
+    ackIds(repoRoot, ['sync.close-during-join'])
+    return repoRoot
+  }
+
+  test('after a read, the rules covering the lines read; none for lines no rule covers', () => {
+    const repoRoot = createMappedRepo()
+    const roomPath = join(repoRoot, 'src/room.ts')
+    const readOf = (toolInput: Record<string, unknown>) =>
+      respondToHook({ hook_event_name: 'PostToolUse', tool_name: 'Read', tool_input: toolInput })
+
+    expect(readOf({ file_path: roomPath })).toEqual({
+      hookSpecificOutput: {
+        hookEventName: 'PostToolUse',
+        additionalContext: [
+          'logicmap: the rules covering src/room.ts (logicmap show <id> for the full entry):',
+          'sync.close-during-join@1  edge  recorded  The socket can close while the join is loading.',
+          '  2-5  §edge  ok',
+        ].join('\n'),
+      },
+    })
+    expect(readOf({ file_path: roomPath, offset: 4, limit: 1 })).not.toBeNull()
+    expect(readOf({ file_path: roomPath, offset: 6, limit: 2 })).toBeNull()
+  })
+
+  test('after an edit, the problems of the rules in that file; nothing when they still match', () => {
+    const repoRoot = createMappedRepo()
+    const roomPath = join(repoRoot, 'src/room.ts')
+    const editOf = () =>
+      respondToHook({
+        hook_event_name: 'PostToolUse',
+        tool_name: 'Edit',
+        tool_input: { file_path: roomPath },
+      })
+
+    expect(editOf()).toBeNull()
+
+    const roomText = readFixtureFile(repoRoot, 'src/room.ts')
+    writeFixtureFiles(repoRoot, {
+      'src/room.ts': roomText.replace('removeConnection', 'dropConnection'),
+    })
+    const editOutput = editOf()
+    expect(editOutput).not.toBeNull()
+    expect(JSON.stringify(editOutput)).toContain('src/room.ts:2: error changed')
+  })
+
+  test('at stop, the errors of check, once; nothing outside a mapped repo', () => {
+    const repoRoot = createMappedRepo()
+    const roomText = readFixtureFile(repoRoot, 'src/room.ts')
+    writeFixtureFiles(repoRoot, {
+      'src/room.ts': roomText.replace('removeConnection', 'dropConnection'),
+    })
+
+    const stopOutput = respondToHook({ hook_event_name: 'Stop', cwd: repoRoot })
+    expect(stopOutput).toMatchObject({ decision: 'block' })
+    expect(JSON.stringify(stopOutput)).toContain('src/room.ts:2: error changed')
+    expect(
+      respondToHook({ hook_event_name: 'Stop', cwd: repoRoot, stop_hook_active: true }),
+    ).toBeNull()
+
+    const plainRepoRoot = createFixtureRepo({ 'src/plain.ts': 'export const plain = 1\n' })
+    expect(respondToHook({ hook_event_name: 'Stop', cwd: plainRepoRoot })).toBeNull()
+    expect(
+      respondToHook({
+        hook_event_name: 'PostToolUse',
+        tool_name: 'Read',
+        tool_input: { file_path: join(plainRepoRoot, 'src/plain.ts') },
+      }),
+    ).toBeNull()
   })
 })

@@ -22,16 +22,23 @@ The checker, run from anywhere inside the repo:
 ```
 bun ~/.claude/skills/logicmap/scripts/logicmap.ts check
 bun ~/.claude/skills/logicmap/scripts/logicmap.ts ack <id>...
-bun ~/.claude/skills/logicmap/scripts/logicmap.ts show [<id> | <file>]
+bun ~/.claude/skills/logicmap/scripts/logicmap.ts show [<domain> | <id> | <file>[:<line>[-<line>]]]
 ```
 
-`show` with no argument lists every entry: the fastest map of a repo's tricky parts on a cold start.
+`show` reads the map from the widest view to the narrowest, each a few thousand tokens at most:
+
+- `show`: every domain with its intro and its rule ids. Start here on a cold start.
+- `show <domain>`: the domain's rules, each with its claim (the first sentence of its `what`).
+- `show <id>`: one entry in full and every site, as `file:start-end`, flow steps in order.
+- `show <file>`: each rule in the file once, with the lines each of its sites covers.
+- `show <file>:<line>` or `<file>:<start>-<end>`: only the rules covering those lines.
 
 ## Reading anchored code
 
-1. Before editing, deleting, simplifying or explaining a file, run `show <file>`. It lists each anchor
-   with its entry's `what` and its status. For every id in the region you will touch, run `show <id>`:
-   the full entry and every anchored site, flow steps in order. Callers that reach the rule through a
+1. Before editing, deleting, simplifying or explaining a file, run `show <file>`, or
+   `show <file>:<start>-<end>` for the lines you will touch. It lists each rule with its claim, and
+   under it the lines each site covers and its status. For every id in the region you will touch, run
+   `show <id>`: the full entry and every anchored site, flow steps in order. Callers that reach the rule through a
    function the entry names (`getDocumentAccessForUser`) are not anchored; grep that name too.
    Done when you know every id in that region, every anchored site of those ids, and the callers of
    the functions their entries name.
@@ -43,7 +50,7 @@ bun ~/.claude/skills/logicmap/scripts/logicmap.ts show [<id> | <file>]
      fact; give the why as inferred, with the evidence its `source` cites.
    - `changed`, `unacked` or `stale-pin`: code moved since anyone re-read the entry. Present the why as
      the recorded rationale, re-derive the behaviour from the code, and repair the map (next section).
-   - no anchor: look for the piece recorded with the line's commit (`git blame`, then the step doc in
+   - no anchor: look for the piece recorded with the line's commit (`git log -L`, then the step doc in
      that commit; see "Working a task in a mapped repo"). It gives the reason the code was written, as
      of that commit. Without one, derive from the code and `git log`, and say the reason is inferred.
 
@@ -133,7 +140,8 @@ code line below its comment, plus everything indented under that line and the cl
 `check` enforces: each `decision`, `invariant` and `edge` id has exactly one defining anchor; each flow
 step has at least one site unless marked `(external)`; every anchor pins the entry's version; the role
 matches the entry's kind; retired ids have no anchors; every active entry has a site; every anchor and
-entry fingerprint matches the lock. It warns when an `edge` or `invariant` has no `test` anchor.
+entry fingerprint matches the lock. It warns when an `edge` or `invariant` has no `test` anchor, and when
+the first sentence of an active entry's `what` is over 200 characters (`long-what`).
 
 ## Ledger entry
 
@@ -150,8 +158,11 @@ history:
 - @1: introduced
 ```
 
-- Required: `kind` (`decision` | `invariant` | `edge` | `flow`), `version`, `what` (one line, the claim),
-  `why`, `source`.
+- Required: `kind` (`decision` | `invariant` | `edge` | `flow`), `version`, `what`, `why`, `source`.
+- The first sentence of `what` is the claim: the rule itself, in at most 200 characters. It is what
+  `show <domain>` and `show <file>` print for the rule. The detail of the rule may follow it in the same
+  field. A sentence ends at `.`, `!` or `?` before a capital letter or the end of the field, so `e.g.`
+  and `req.ip` do not end it.
 - `source` says where the claim comes from. `inferred — <evidence>` (commits, tests, traced paths)
   when an agent worked it out from the code; otherwise where a person recorded the intent: a doc, an
   ADR, a PR or issue, a commit message, `confirmed by <name> <date>`. `show` prints `inferred` or
@@ -161,6 +172,8 @@ history:
 - Flow entries add `steps:`, one `N. text` line per step; append `(external)` to a step with no code in
   this repo (a user clicking an email link).
 - A line indented under a field continues it. The file is `logicmap/<domain>.md`; the heading is the id.
+- The file opens with `# <domain>` and a short intro, the prose above its first entry: what the domain's
+  rules cover and where its code starts. `show` prints it beside the domain's rule ids.
 
 ## Working a task in a mapped repo
 
@@ -228,9 +241,12 @@ a plan file in the repo, and the plan names the rules each step touches.
 Resuming a task: read its plan, then `show <id>` for each id it names, then `check`. The first step
 with an unticked sub-step is where the work stands.
 
-Why a line was written, and what it was meant to solve: `git blame -L <n>,<n> <file>` gives the
-commit; the commit's files include the step doc written with it; the piece in that doc that names the
-function or the file is the reason, as the agent that wrote the line recorded it. A piece describes the
+Why a line was written, and what it was meant to solve: `git log -L <n>,<n>:<file>` lists every commit
+that changed those lines, newest first; `git blame -w -C -C -L <n>,<n> <file>` finds the commit that
+wrote the line through whitespace changes and code moved between files, where a plain `git blame`
+stops at the move or the reformat. The commit's files include the step doc written with it; the piece
+in that doc that names the function or the file is the reason, as the agent that wrote the line
+recorded it. A piece describes the
 code as of its commit: compare it with the code today before repeating it. What must hold now is the
 logicmap entry, when the line has one.
 
@@ -260,10 +276,39 @@ Rules:
 ## Revisions
 ```
 
+## The hook (Claude Code)
+
+`scripts/hook.ts` puts the map in front of the agent without being asked, in every repo with a
+`logicmap/` folder (anywhere else it prints nothing):
+
+- after a `Read`, the rules covering the lines read, with their claims and covered lines;
+- after an `Edit`, `MultiEdit` or `Write`, the errors `check` reports in that file, with what to do;
+- at `Stop`, `check`'s errors, once: the agent resolves them, or tells the user why they stay (another
+  session's work in progress).
+
+Install it once, in `~/.claude/settings.json` (merge into the `hooks` already there):
+
+```json
+{
+  "hooks": {
+    "PostToolUse": [
+      { "matcher": "Read", "hooks": [{ "type": "command", "command": "bun ~/.claude/skills/logicmap/scripts/hook.ts", "timeout": 30 }] },
+      { "matcher": "Edit|MultiEdit|Write", "hooks": [{ "type": "command", "command": "bun ~/.claude/skills/logicmap/scripts/hook.ts", "timeout": 30 }] }
+    ],
+    "Stop": [
+      { "hooks": [{ "type": "command", "command": "bun ~/.claude/skills/logicmap/scripts/hook.ts", "timeout": 30 }] }
+    ]
+  }
+}
+```
+
+The hook adds to what the protocol asks; it does not replace it. Run `show <id>` before relying on a rule
+the hook names, and `check` before a commit.
+
 ## Setting it up in a repo
 
 1. Create `logicmap/` and map the 3 to 10 places agents most often get wrong: the cross-file rules,
-   the fences, the flows nobody can trace. In a codebase whose reasons are not written down, follow
+   the fences, the flows nobody can trace. Open each `<domain>.md` with `# <domain>` and its intro. In a codebase whose reasons are not written down, follow
    `mapping-an-existing-repo.md`.
 2. `ack` every id; `check` exits 0.
 3. Add this to the repo's agent instructions (`AGENTS.md`, `CLAUDE.md`), so agents without this skill
@@ -274,7 +319,8 @@ Rules:
    Comments of the form `§<role> <id>@<version>` anchor code to entries in `logicmap/<domain>.md` (the
    rule, why, the rejected alternatives, what breaks). `logicmap` below means
    `bun ~/.claude/skills/logicmap/scripts/logicmap.ts`, run from anywhere in the repo.
-   - Before editing or explaining anchored code: `logicmap show <file>`, then `logicmap show <id>` for
+   - On a cold start, `logicmap show`: every domain and its rule ids. Before editing or explaining
+     anchored code: `logicmap show <file>` (or `<file>:<start>-<end>`), then `logicmap show <id>` for
      each id you touch (its entry and every anchored site, flow steps in order).
    - After editing: `logicmap check`, and resolve each line it prints: `logicmap ack <id>` when the entry
      still holds; when its meaning changed, bump the entry's `version`, re-verify every site `check` then

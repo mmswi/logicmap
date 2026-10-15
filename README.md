@@ -39,11 +39,18 @@ method adds to `AGENTS.md` / `CLAUDE.md` are plain text.
 Run from anywhere inside a repo:
 
 ```
-bun ~/.claude/skills/logicmap/scripts/logicmap.ts show               every rule, one line each
-bun ~/.claude/skills/logicmap/scripts/logicmap.ts show <file|id>     a file's anchors, or one rule and all its sites
-bun ~/.claude/skills/logicmap/scripts/logicmap.ts check              every disagreement; exits 1 on any error
-bun ~/.claude/skills/logicmap/scripts/logicmap.ts ack <id>...        record that you re-read these rules against their code
+logicmap.ts show                         every domain, its intro and its rule ids
+logicmap.ts show <domain>                the domain's rules, each with its claim
+logicmap.ts show <id>                    one rule in full and every site, with the lines it covers
+logicmap.ts show <file>[:<line>[-<line>]]  the rules in a file, or covering those lines
+logicmap.ts check                        every disagreement; exits 1 on any error
+logicmap.ts ack <id>...                  record that you re-read these rules against their code
 ```
+
+`logicmap.ts` is `bun ~/.claude/skills/logicmap/scripts/logicmap.ts`.
+
+In Claude Code, `scripts/hook.ts` adds the rules covering the lines an agent reads, the problems an
+edit leaves, and `check`'s errors at the end of a turn. To install it, see "The hook" in `SKILL.md`.
 
 To set it up in a repo, follow "Setting it up in a repo" in `SKILL.md`. To work a task in a mapped
 repo (a plan whose steps name the rules they touch, decisions recorded when the user makes them, each

@@ -64,6 +64,7 @@ export const PROBLEM_CODES = {
   gone: 'gone',
   unknownId: 'unknown-id',
   untested: 'untested',
+  longWhat: 'long-what',
 } as const
 export type ProblemCode = (typeof PROBLEM_CODES)[keyof typeof PROBLEM_CODES]
 
@@ -97,11 +98,12 @@ export type LedgerEntry = {
   status: EntryStatus
   provenance: EntryProvenance
   what: string
+  claim: string
   steps: FlowStep[]
   text: string
 }
 
-const LEDGER_DIRECTORY = 'logicmap'
+export const LEDGER_DIRECTORY = 'logicmap'
 const LEDGER_FILE_EXTENSION = '.md'
 const LOCK_FILE_EXTENSION = '.lock'
 const SINGLE_LOCK_FILE_BEFORE_SPLIT = `${LEDGER_DIRECTORY}/lock`
@@ -231,6 +233,12 @@ const EXTERNAL_STEP_MARKER = '(external)'
 const ID_PATTERN = new RegExp(`^${ID_SOURCE}$`)
 const VERSION_PATTERN = /^[1-9]\d*$/
 
+// The claim is the first sentence of what; the detail of the rule may follow it.
+const CLAIM_MAX_LENGTH = 200
+// A sentence ends at . ! or ? before a capital letter or the end, so "e.g." and "1.15" do not end it.
+const FIRST_SENTENCE_PATTERN = /^.+?[.!?](?=\s+[A-Z]|\s*$)/
+const claimOf = (what: string): string => FIRST_SENTENCE_PATTERN.exec(what)?.[0] ?? what
+
 const isEntryFieldName = (fieldName: string | undefined): fieldName is EntryFieldName =>
   ENTRY_FIELD_NAMES.some((knownFieldName) => knownFieldName === fieldName)
 
@@ -355,6 +363,13 @@ const parseEntry = (entryBlock: EntryBlock): { entry: LedgerEntry; problems: Pro
         : ENTRY_PROVENANCES.recorded
 
   const what = fieldByName.get('what')?.text ?? ''
+  const claim = claimOf(what)
+  const isLongClaim = status === ENTRY_STATUSES.active && claim.length > CLAIM_MAX_LENGTH
+  if (isLongClaim) {
+    const whatLine = fieldByName.get('what')?.line ?? entryBlock.line
+    const message = `${id}'s what opens with a ${claim.length}-character sentence: put the claim first, in at most ${CLAIM_MAX_LENGTH} characters, and the detail after it`
+    problems.push(warningAt(PROBLEM_CODES.longWhat, { file, line: whatLine }, id, message))
+  }
   const text = entryBlock.lines.join('\n').trimEnd()
   return {
     entry: {
@@ -366,6 +381,7 @@ const parseEntry = (entryBlock: EntryBlock): { entry: LedgerEntry; problems: Pro
       status,
       provenance,
       what,
+      claim,
       steps,
       text,
     },
@@ -385,13 +401,35 @@ const listLedgerDirectoryFiles = (repoRoot: string, extension: string): string[]
     .map((fileName) => `${LEDGER_DIRECTORY}/${fileName}`)
 }
 
+// A domain is one ledger file. Its intro is the prose between the `# <domain>` title and the first
+// entry: what the domain covers and where its code starts.
+export type LedgerDomain = { name: string; file: string; intro: string }
+
+const ENTRY_HEADING_START_PATTERN = /^## /m
+const readDomainIntro = (fileText: string): string => {
+  const [textAboveFirstEntry = ''] = fileText.split(ENTRY_HEADING_START_PATTERN)
+  return textAboveFirstEntry
+    .split('\n')
+    .filter((line) => !line.startsWith('# '))
+    .join(' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
 const readLedger = (
   repoRoot: string,
-): { entriesById: Map<string, LedgerEntry>; problems: Problem[] } => {
+): {
+  entriesById: Map<string, LedgerEntry>
+  domainsByName: Map<string, LedgerDomain>
+  problems: Problem[]
+} => {
   const entriesById = new Map<string, LedgerEntry>()
+  const domainsByName = new Map<string, LedgerDomain>()
   const problems: Problem[] = []
   for (const file of listLedgerDirectoryFiles(repoRoot, LEDGER_FILE_EXTENSION)) {
     const fileText = readFileSync(join(repoRoot, file), 'utf8')
+    const domainName = basename(file, LEDGER_FILE_EXTENSION)
+    domainsByName.set(domainName, { name: domainName, file, intro: readDomainIntro(fileText) })
     for (const entryBlock of splitIntoEntryBlocks(file, fileText)) {
       const { entry, problems: entryProblems } = parseEntry(entryBlock)
       problems.push(...entryProblems)
@@ -404,7 +442,7 @@ const readLedger = (
       entriesById.set(entry.id, entry)
     }
   }
-  return { entriesById, problems }
+  return { entriesById, domainsByName, problems }
 }
 
 // ---------- Cross-check: each anchor against its entry, each entry against its anchors ----------
@@ -517,6 +555,7 @@ type LockSite = {
   fingerprint: string
   file: string
   line: number
+  lastLine: number
   label: string
 }
 
@@ -555,7 +594,12 @@ const isBlankLine = (line: string): boolean => line.trim() === ''
  *          plus closing-bracket lines at the head's indentation  `}`  `)`  `} else {`
  *          (a closing line that opens a new block keeps the block going)
  */
-const findAnchoredLines = (fileLines: string[], anchorLineIndex: number): string[] => {
+type AnchoredLineRange = { headLineIndex: number; lastLineIndex: number }
+
+const findAnchoredLineRange = (
+  fileLines: string[],
+  anchorLineIndex: number,
+): AnchoredLineRange | null => {
   const anchorLine = fileLines[anchorLineIndex] ?? ''
   const isCommentOnlyAnchorLine = COMMENT_LINE_PATTERN.test(anchorLine)
   const headLineIndex = isCommentOnlyAnchorLine
@@ -565,7 +609,7 @@ const findAnchoredLines = (fileLines: string[], anchorLineIndex: number): string
       )
     : anchorLineIndex
   if (headLineIndex === -1) {
-    return []
+    return null
   }
   let decoratedLineIndex = headLineIndex
   while (
@@ -595,7 +639,7 @@ const findAnchoredLines = (fileLines: string[], anchorLineIndex: number): string
       break
     }
   }
-  return fileLines.slice(headLineIndex, lastLineIndex + 1)
+  return { headLineIndex, lastLineIndex }
 }
 
 // Anchors of retired entries are left out: they must be deleted, not acked.
@@ -620,13 +664,19 @@ const collectLockSites = (
     const place = `${anchor.id} ${anchor.role} ${anchor.file}`
     const occurrence = (occurrenceCountByPlace.get(place) ?? 0) + 1
     occurrenceCountByPlace.set(place, occurrence)
+    const anchoredLineRange = findAnchoredLineRange(fileLines, anchor.line - 1)
+    const anchoredLines =
+      anchoredLineRange === null
+        ? []
+        : fileLines.slice(anchoredLineRange.headLineIndex, anchoredLineRange.lastLineIndex + 1)
     lockSites.push({
       key: `${place}#${occurrence}`,
       id: anchor.id,
       version: anchor.version,
-      fingerprint: fingerprintLines(findAnchoredLines(fileLines, anchor.line - 1)),
+      fingerprint: fingerprintLines(anchoredLines),
       file: anchor.file,
       line: anchor.line,
+      lastLine: anchoredLineRange === null ? anchor.line : anchoredLineRange.lastLineIndex + 1,
       label: `the code under ${describeAnchor(anchor)}`,
     })
   }
@@ -638,6 +688,7 @@ const collectLockSites = (
       fingerprint: fingerprintLines(entry.text.split('\n')),
       file: entry.file,
       line: entry.line,
+      lastLine: entry.line + entry.text.split('\n').length - 1,
       label: `the entry ${entry.id}`,
     })
   }
@@ -715,13 +766,14 @@ const byFileThenLine = (first: Problem, second: Problem): number =>
 type RepoAnalysis = {
   anchors: Anchor[]
   entriesById: Map<string, LedgerEntry>
+  domainsByName: Map<string, LedgerDomain>
   lockSites: LockSite[]
   problems: Problem[]
 }
 
 const analyzeRepo = (repoRoot: string): RepoAnalysis => {
   const { anchors, problems } = scanAnchors(repoRoot)
-  const { entriesById, problems: ledgerProblems } = readLedger(repoRoot)
+  const { entriesById, domainsByName, problems: ledgerProblems } = readLedger(repoRoot)
   problems.push(...ledgerProblems)
   const anchorsById = new Map<string, Anchor[]>()
   for (const anchor of anchors) {
@@ -740,7 +792,7 @@ const analyzeRepo = (repoRoot: string): RepoAnalysis => {
     problems.push(...checkEntryAgainstAnchors(entry, anchorsById.get(entry.id) ?? []))
   }
   const lockSites = collectLockSites(repoRoot, anchors, entriesById)
-  return { anchors, entriesById, lockSites, problems }
+  return { anchors, entriesById, domainsByName, lockSites, problems }
 }
 
 const findAllProblems = (repoRoot: string, analysis: RepoAnalysis): Problem[] =>
@@ -794,8 +846,15 @@ export const ackIds = (
   const lockLines = [...keptLockLines, ...ackedLockLines].sort()
   // A lock line starts with its key, and a key with its id.
   const lockLinesByFile = Map.groupBy(lockLines, (lockLine) => lockFileOf(idOfLockKey(lockLine)))
+  // Only the acked ids' lock files are written, so two sessions acking different domains never overwrite
+  // each other's lines; splitting the single lock from before the split writes every domain's file.
+  const ackedLockFiles = new Set([...requestedIds].map(lockFileOf))
+  const isSplittingSingleLock = existsSync(join(repoRoot, SINGLE_LOCK_FILE_BEFORE_SPLIT))
   for (const [lockFile, domainLockLines] of lockLinesByFile) {
-    writeFileSync(join(repoRoot, lockFile), `${[LOCK_HEADER, ...domainLockLines].join('\n')}\n`)
+    const shouldWriteLockFile = isSplittingSingleLock || ackedLockFiles.has(lockFile)
+    if (shouldWriteLockFile) {
+      writeFileSync(join(repoRoot, lockFile), `${[LOCK_HEADER, ...domainLockLines].join('\n')}\n`)
+    }
   }
   // The single lock from before the split, or a domain whose entries were all deleted: left on disk,
   // its old lines would be read back as `gone`.
@@ -823,34 +882,123 @@ const statusOf = (placeProblems: Problem[]): string =>
     ? 'ok'
     : [...new Set(placeProblems.map((problem) => problem.code))].join(',')
 
-// The text an agent reads: no target → every entry; an id → its entry and sites; a file → its anchors.
-export const showLogicMap = (repoRoot: string, target: string | undefined): string => {
+// Lines of one file, both ends included, numbered from 1.
+export type LineRange = { firstLine: number; lastLine: number }
+
+const describeLineRange = ({ firstLine, lastLine }: LineRange): string =>
+  firstLine === lastLine ? `${firstLine}` : `${firstLine}-${lastLine}`
+
+const doLineRangesMeet = (first: LineRange, second: LineRange): boolean =>
+  first.firstLine <= second.lastLine && second.firstLine <= first.lastLine
+
+// `src/room.ts:40` or `src/room.ts:40-60`: the rules covering those lines of that file.
+const FILE_LINES_TARGET_PATTERN = /^(.+):(\d+)(?:-(\d+))?$/
+
+const countOf = (count: number, noun: string): string => `${count} ${noun}${count === 1 ? '' : 's'}`
+
+const SHOW_LEVELS_HINT =
+  'show <domain>: its rules and their claims; show <id>: one rule and its sites; show <file>[:<line>[-<line>]]: the rules in a file.'
+
+// The views an agent reads, from the widest to the narrowest: every domain with its intro and its rule
+// ids; a domain's rules with their claims; one rule's entry and sites; the rules in a file or some of its lines.
+const createShowViews = (repoRoot: string) => {
   const analysis = analyzeRepo(repoRoot)
   const problems = findAllProblems(repoRoot, analysis)
 
-  const describeSite = (anchor: Anchor): string => {
-    const siteProblems = problems.filter(
-      (problem) =>
-        problem.id === anchor.id && problem.file === anchor.file && problem.line === anchor.line,
+  const siteStatusOf = (anchor: Anchor): string =>
+    statusOf(
+      problems.filter(
+        (problem) =>
+          problem.id === anchor.id && problem.file === anchor.file && problem.line === anchor.line,
+      ),
     )
-    return `${anchor.file}:${anchor.line}  ${describeAnchor(anchor)}  ${statusOf(siteProblems)}`
+
+  // The lines an anchor covers, from its own line to the last line of its block; an anchor of a retired
+  // entry has no block, only its line.
+  const lastCoveredLineByPlace = new Map(
+    analysis.lockSites.map((lockSite) => [`${lockSite.file}:${lockSite.line}`, lockSite.lastLine]),
+  )
+  const coveredLinesOf = (anchor: Anchor): LineRange => ({
+    firstLine: anchor.line,
+    lastLine: lastCoveredLineByPlace.get(`${anchor.file}:${anchor.line}`) ?? anchor.line,
+  })
+
+  const describeSite = (anchor: Anchor): string =>
+    `${anchor.file}:${describeLineRange(coveredLinesOf(anchor))}  ${describeAnchor(anchor)}  ${siteStatusOf(anchor)}`
+
+  // Each rule once, in the order its first site appears, with every site in the requested lines under it.
+  const showFileRules = (file: string, requestedLines: LineRange | null): string => {
+    const fileAnchors = analysis.anchors.filter((anchor) => anchor.file === file)
+    const shownAnchors =
+      requestedLines === null
+        ? fileAnchors
+        : fileAnchors.filter((anchor) => doLineRangesMeet(coveredLinesOf(anchor), requestedLines))
+    const anchorsById = Map.groupBy(shownAnchors, (anchor) => anchor.id)
+    const ruleSections = [...anchorsById].map(([id, ruleAnchors]) => {
+      const entry = analysis.entriesById.get(id)
+      const ruleLine =
+        entry === undefined
+          ? `${id}  (no entry)`
+          : `${id}@${entry.version ?? '?'}  ${entry.kind ?? '?'}  ${entry.provenance}  ${entry.claim}`
+      const siteLines = ruleAnchors.map((anchor) => {
+        const stepNote = anchor.step === null ? '' : ` #${anchor.step}`
+        return `  ${describeLineRange(coveredLinesOf(anchor))}  §${anchor.role}${stepNote}  ${siteStatusOf(anchor)}`
+      })
+      return [ruleLine, ...siteLines].join('\n')
+    })
+    return ruleSections.join('\n')
   }
 
-  const showEveryEntry = (): string => {
-    const entries = [...analysis.entriesById.values()].sort((first, second) =>
-      first.id.localeCompare(second.id),
-    )
-    if (entries.length === 0) {
+  const isAnchoredFile = (file: string): boolean =>
+    analysis.anchors.some((anchor) => anchor.file === file)
+  const describeUnanchoredFile = (file: string): string =>
+    `${file} has no anchors: no rule in the map is defined or used in it`
+
+  const entryStatusOf = (entry: LedgerEntry): string =>
+    statusOf(problems.filter((problem) => problem.id === entry.id))
+
+  // Retired entries are counted in their domain's heading, never listed: no code follows them.
+  const activeEntriesOf = (domain: LedgerDomain): LedgerEntry[] =>
+    [...analysis.entriesById.values()]
+      .filter((entry) => entry.file === domain.file && entry.status === ENTRY_STATUSES.active)
+      .sort((first, second) => first.id.localeCompare(second.id))
+
+  const describeDomain = (domain: LedgerDomain): string[] => {
+    const retiredCount = [...analysis.entriesById.values()].filter(
+      (entry) => entry.file === domain.file && entry.status === ENTRY_STATUSES.retired,
+    ).length
+    const retiredNote = retiredCount === 0 ? '' : ` (+${retiredCount} retired)`
+    const headingLine = `${domain.name}  ${countOf(activeEntriesOf(domain).length, 'rule')}${retiredNote}  ${domain.file}`
+    return domain.intro === '' ? [headingLine] : [headingLine, `  ${domain.intro}`]
+  }
+
+  // Each rule by its id alone, plus what differs from the usual: a problem, or a why nobody recorded.
+  const showDomainsMap = (): string => {
+    const domains = [...analysis.domainsByName.values()]
+    const ruleCount = domains.reduce((count, domain) => count + activeEntriesOf(domain).length, 0)
+    if (ruleCount === 0) {
       return `no entries in ${LEDGER_DIRECTORY}/ yet`
     }
-    const entryLines = entries.map((entry) => {
-      const siteCount = analysis.anchors.filter((anchor) => anchor.id === entry.id).length
-      const entryProblems = problems.filter((problem) => problem.id === entry.id)
-      const status =
-        entry.status === ENTRY_STATUSES.retired ? ENTRY_STATUSES.retired : statusOf(entryProblems)
-      return `${entry.id}@${entry.version ?? '?'}  ${entry.kind ?? '?'}  ${status}  ${entry.provenance}  ${entry.what}  (sites: ${siteCount})`
+    const headerLine = `logicmap: ${countOf(ruleCount, 'rule')} in ${countOf(domains.length, 'domain')}. ${SHOW_LEVELS_HINT}`
+    const domainSections = domains.map((domain) => {
+      const ruleLines = activeEntriesOf(domain).map((entry) => {
+        const status = entryStatusOf(entry)
+        const statusNote = status === 'ok' ? '' : `  ${status}`
+        const provenanceNote =
+          entry.provenance === ENTRY_PROVENANCES.recorded ? '' : `  ${entry.provenance}`
+        return `  ${entry.id}  ${entry.kind ?? '?'}${statusNote}${provenanceNote}`
+      })
+      return ['', ...describeDomain(domain), ...ruleLines].join('\n')
     })
-    return entryLines.join('\n')
+    return [headerLine, ...domainSections].join('\n')
+  }
+
+  const showOneDomain = (domain: LedgerDomain): string => {
+    const ruleLines = activeEntriesOf(domain).map((entry) => {
+      const siteCount = analysis.anchors.filter((anchor) => anchor.id === entry.id).length
+      return `${entry.id}@${entry.version ?? '?'}  ${entry.kind ?? '?'}  ${entryStatusOf(entry)}  ${entry.provenance}  ${entry.claim}  (sites: ${siteCount})`
+    })
+    return [...describeDomain(domain), ...ruleLines].join('\n')
   }
 
   const showOneId = (id: string): string => {
@@ -870,31 +1018,66 @@ export const showLogicMap = (repoRoot: string, target: string | undefined): stri
     return [...entryLines, '', 'sites:', ...siteLines, ...problemSection].join('\n')
   }
 
-  const showOneFile = (file: string): string => {
-    const anchorLines = analysis.anchors
-      .filter((anchor) => anchor.file === file)
-      .map((anchor) => {
-        const entry = analysis.entriesById.get(anchor.id)
-        const entryDescription =
-          entry === undefined ? '(no entry)' : `${entry.provenance}  ${entry.what}`
-        return `${describeSite(anchor)}  ${entryDescription}`
-      })
-    return anchorLines.join('\n')
-  }
+  const isKnownId = (id: string): boolean =>
+    analysis.entriesById.has(id) || analysis.anchors.some((anchor) => anchor.id === id)
 
+  return {
+    analysis,
+    showDomainsMap,
+    showOneDomain,
+    showOneId,
+    showFileRules,
+    isAnchoredFile,
+    isKnownId,
+    describeUnanchoredFile,
+  }
+}
+
+export const showLogicMap = (repoRoot: string, target: string | undefined): string => {
+  const views = createShowViews(repoRoot)
   if (target === undefined) {
-    return showEveryEntry()
+    return views.showDomainsMap()
   }
-  const isAnchoredFile = analysis.anchors.some((anchor) => anchor.file === target)
-  if (isAnchoredFile) {
-    return showOneFile(target)
+  const [, fileOfLines, firstLineText, lastLineText] = FILE_LINES_TARGET_PATTERN.exec(target) ?? []
+  if (fileOfLines !== undefined && views.isAnchoredFile(fileOfLines)) {
+    const firstLine = Number(firstLineText)
+    const lastLine = lastLineText === undefined ? firstLine : Number(lastLineText)
+    const requestedLines = { firstLine, lastLine }
+    const rulesView = views.showFileRules(fileOfLines, requestedLines)
+    return rulesView === ''
+      ? `${fileOfLines}:${describeLineRange(requestedLines)}: no rule covers these lines`
+      : rulesView
   }
-  const isKnownId =
-    analysis.entriesById.has(target) || analysis.anchors.some((anchor) => anchor.id === target)
-  if (isKnownId) {
-    return showOneId(target)
+  if (views.isAnchoredFile(target)) {
+    return views.showFileRules(target, null)
   }
-  return `nothing named "${target}": not an id in ${LEDGER_DIRECTORY}/, not a file with anchors`
+  if (views.isKnownId(target)) {
+    return views.showOneId(target)
+  }
+  const domain = views.analysis.domainsByName.get(target)
+  if (domain !== undefined) {
+    return views.showOneDomain(domain)
+  }
+  const unanchoredFile = fileOfLines ?? target
+  if (existsSync(join(repoRoot, unanchoredFile))) {
+    return views.describeUnanchoredFile(unanchoredFile)
+  }
+  return `nothing named "${target}": not a domain or an id in ${LEDGER_DIRECTORY}/, not a file with anchors`
+}
+
+// The rules covering some lines of a file (all of it when lines is null), or null when none does: what
+// the hook adds after a read.
+export const showRulesInLines = (
+  repoRoot: string,
+  file: string,
+  lines: LineRange | null,
+): string | null => {
+  const views = createShowViews(repoRoot)
+  if (!views.isAnchoredFile(file)) {
+    return null
+  }
+  const rulesView = views.showFileRules(file, lines)
+  return rulesView === '' ? null : rulesView
 }
 
 // ---------- Command line ----------
@@ -902,7 +1085,8 @@ export const showLogicMap = (repoRoot: string, target: string | undefined): stri
 const USAGE = [
   'usage: bun logicmap.ts check              every problem, one per line; exit 1 on any error',
   "       bun logicmap.ts ack <id>...         record these ids' code and entries as verified",
-  "       bun logicmap.ts show [<id> | <file>] every entry; one id with its sites; one file's anchors",
+  '       bun logicmap.ts show [<domain> | <id> | <file>[:<line>[-<line>]]]',
+  "                                           every domain; a domain's rules; one rule and its sites; a file's rules",
 ].join('\n')
 
 const findRepoRoot = (): string =>
@@ -910,14 +1094,19 @@ const findRepoRoot = (): string =>
 
 // A path typed from any directory becomes the repo-relative path anchors are recorded under.
 const toShowTarget = (repoRoot: string, typedTarget: string): string => {
-  const typedPath = resolve(process.cwd(), typedTarget)
-  return existsSync(typedPath) ? relative(repoRoot, typedPath).split(sep).join('/') : typedTarget
+  const [, typedFile = typedTarget, lineSuffix = ''] =
+    /^(.+?)(:\d+(?:-\d+)?)?$/.exec(typedTarget) ?? []
+  const typedPath = resolve(process.cwd(), typedFile)
+  return existsSync(typedPath)
+    ? `${relative(repoRoot, typedPath).split(sep).join('/')}${lineSuffix}`
+    : typedTarget
 }
 
+export const formatProblem = (problem: Problem): string =>
+  `${problem.file}:${problem.line}: ${problem.severity} ${problem.code}: ${problem.message}`
+
 const printProblem = (problem: Problem): void => {
-  console.log(
-    `${problem.file}:${problem.line}: ${problem.severity} ${problem.code}: ${problem.message}`,
-  )
+  console.log(formatProblem(problem))
 }
 
 const runCommandLine = (commandLineArguments: string[]): number => {
