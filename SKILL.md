@@ -283,8 +283,9 @@ Rules:
 
 - after a `Read`, the rules covering the lines read, with their claims and covered lines;
 - after an `Edit`, `MultiEdit` or `Write`, the errors `check` reports in that file, with what to do;
-- at `Stop`, `check`'s errors, once: the agent resolves them, or tells the user why they stay (another
-  session's work in progress).
+- at `Stop`, `check`'s errors, once, for a session that edited a file in the repo since its last stop:
+  the agent resolves them, or tells the user why they stay. A session that only read is not asked, so one
+  session's work in progress does not stop the others.
 
 Install it once, in `~/.claude/settings.json` (merge into the `hooks` already there):
 

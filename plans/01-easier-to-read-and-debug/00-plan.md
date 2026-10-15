@@ -103,3 +103,7 @@ teamabled `explanatory-docs/logicmap/05-short-claims-and-domain-intros/`.
 - 2026-10-15: step 3b added. Four subagents were about to shorten teamabled's claims in parallel, and
   every ack rewrote every domain's lock file, so two acks running at once (two sessions, or two
   agents) could overwrite each other's lines. Found by Claude while planning that work.
+- 2026-10-15: the Stop hook asks only a session that edited a file in the repo since its last stop. While
+  four subagents rewrote teamabled's ledger, every turn end of this session (which had edited nothing
+  there) was blocked by their unacked entries, and so would every other session open in the repo.
+  Found by Claude from the hook's own blocks.

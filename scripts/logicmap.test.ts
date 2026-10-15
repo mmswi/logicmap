@@ -841,19 +841,35 @@ describe('hook', () => {
     expect(JSON.stringify(editOutput)).toContain('src/room.ts:2: error changed')
   })
 
-  test('at stop, the errors of check, once; nothing outside a mapped repo', () => {
+  test('at stop, the errors of check, once, for a session that edited the repo; nothing outside one', () => {
     const repoRoot = createMappedRepo()
+    const roomPath = join(repoRoot, 'src/room.ts')
     const roomText = readFixtureFile(repoRoot, 'src/room.ts')
     writeFixtureFiles(repoRoot, {
       'src/room.ts': roomText.replace('removeConnection', 'dropConnection'),
     })
+    const editingSessionId = `editing-${crypto.randomUUID()}`
+    const readingSessionId = `reading-${crypto.randomUUID()}`
+    const stopOf = (sessionId: string, isStopHookActive: boolean) =>
+      respondToHook({
+        hook_event_name: 'Stop',
+        session_id: sessionId,
+        cwd: repoRoot,
+        stop_hook_active: isStopHookActive,
+      })
+    respondToHook({
+      hook_event_name: 'PostToolUse',
+      session_id: editingSessionId,
+      tool_name: 'Edit',
+      tool_input: { file_path: roomPath },
+    })
 
-    const stopOutput = respondToHook({ hook_event_name: 'Stop', cwd: repoRoot })
+    expect(stopOf(readingSessionId, false)).toBeNull()
+    expect(stopOf(editingSessionId, true)).toBeNull()
+    const stopOutput = stopOf(editingSessionId, false)
     expect(stopOutput).toMatchObject({ decision: 'block' })
     expect(JSON.stringify(stopOutput)).toContain('src/room.ts:2: error changed')
-    expect(
-      respondToHook({ hook_event_name: 'Stop', cwd: repoRoot, stop_hook_active: true }),
-    ).toBeNull()
+    expect(stopOf(editingSessionId, false)).toBeNull()
 
     const plainRepoRoot = createFixtureRepo({ 'src/plain.ts': 'export const plain = 1\n' })
     expect(respondToHook({ hook_event_name: 'Stop', cwd: plainRepoRoot })).toBeNull()

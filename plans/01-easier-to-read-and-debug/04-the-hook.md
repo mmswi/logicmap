@@ -101,3 +101,49 @@ Check: piping a `Read` of `src/documents/routes.ts` lines 400-409 printed
 `access.one-predicate-per-action@5 ... 395-415 §uses ok`; an `Edit` with no problem, a `Stop` in
 `/tmp` and a `Read` of a file outside any repo printed nothing; `jq -e` finds both matchers. Then a
 real `Read` of `routes.ts` lines 400-405 in this session came back with that rule as hook context.
+
+## Piece 5 (revision): stop asks only a session that edited the repo
+
+What: after an edit in a mapped repo the hook appends the repo root to a file named after the session
+(`$TMPDIR/logicmap-hook/<session_id>.txt`); at `Stop` it reads and deletes that file and blocks only
+when the session's cwd repo is in it. Without a session id it asks every stop, as before.
+Why: during this task, four subagents left 44 `changed` entries in teamabled while they worked, and the
+hook blocked every turn end of this session, which had edited nothing there. Every other session open
+in the repo would have been blocked by the same work in progress.
+Where: `scripts/hook.ts`: `HookInput.session_id`, `recordEditedRepo`, `takeEditedRepos`,
+`respondToEdit`, `respondToStop`, `parseHookInput`; the stop test in `scripts/logicmap.test.ts`; the
+hook section of `SKILL.md`.
+
+```ts
+// The mapped repos each session edited since its last stop, one file per session, so a stop asks only
+// the sessions that changed something: another session's work in progress stops nobody else.
+const EDITED_REPOS_DIRECTORY = join(tmpdir(), 'logicmap-hook')
+const editedReposFileOf = (sessionId: string): string =>
+  join(EDITED_REPOS_DIRECTORY, `${sessionId.replace(/[^\w-]/g, '_')}.txt`)
+
+const recordEditedRepo = (sessionId: string, repoRoot: string): void => {
+  mkdirSync(EDITED_REPOS_DIRECTORY, { recursive: true })
+  appendFileSync(editedReposFileOf(sessionId), `${repoRoot}\n`)
+}
+
+// Read once: the next stop asks again only after another edit.
+const takeEditedRepos = (sessionId: string): Set<string> => {
+  const editedReposFile = editedReposFileOf(sessionId)
+  if (!existsSync(editedReposFile)) {
+    return new Set()
+  }
+  const editedRepos = readFileSync(editedReposFile, 'utf8').split('\n').filter(Boolean)
+  rmSync(editedReposFile)
+  return new Set(editedRepos)
+}
+```
+
+```diff
++  const didSessionEditRepo = sessionId === null || takeEditedRepos(sessionId).has(repoRoot)
++  if (!didSessionEditRepo) {
++    return null
++  }
+```
+
+Test, red first: a reading session's stop gets nothing; the editing session's stop blocks once with the
+`changed` error, then gets nothing until it edits again. Green: 24 pass; strict `tsc` clean.

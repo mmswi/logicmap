@@ -1,5 +1,6 @@
 import { execFileSync } from 'node:child_process'
-import { existsSync, realpathSync } from 'node:fs'
+import { appendFileSync, existsSync, mkdirSync, readFileSync, realpathSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { dirname, join, relative, sep } from 'node:path'
 import {
   LEDGER_DIRECTORY,
@@ -17,7 +18,8 @@ import {
  *   PostToolUse Read                      → the rules covering the lines just read
  *   PostToolUse Edit / MultiEdit / Write  → what check reports for the edited file's rules
  *   Stop                                  → check's errors, once, so the agent resolves them or says
- *                                           why they stay
+ *                                           why they stay; only for a session that edited the repo
+ *                                           since its last stop
  *
  * It answers only inside a git repo that has a logicmap/ folder; anywhere else it prints nothing.
  */
@@ -30,6 +32,7 @@ const EDITING_TOOL_NAMES: readonly string[] = ['Edit', 'MultiEdit', 'Write']
 // The fields of Claude Code's hook input this hook reads.
 export type HookInput = {
   hook_event_name: string
+  session_id?: string
   cwd?: string
   tool_name?: string
   tool_input?: { file_path?: unknown; offset?: unknown; limit?: unknown }
@@ -63,6 +66,28 @@ const findMappedRepoRoot = (directory: string): string | null => {
 }
 
 // git prints the repo root with symlinks resolved (macOS: /var → /private/var), so the path is too.
+// The mapped repos each session edited since its last stop, one file per session, so a stop asks only
+// the sessions that changed something: another session's work in progress stops nobody else.
+const EDITED_REPOS_DIRECTORY = join(tmpdir(), 'logicmap-hook')
+const editedReposFileOf = (sessionId: string): string =>
+  join(EDITED_REPOS_DIRECTORY, `${sessionId.replace(/[^\w-]/g, '_')}.txt`)
+
+const recordEditedRepo = (sessionId: string, repoRoot: string): void => {
+  mkdirSync(EDITED_REPOS_DIRECTORY, { recursive: true })
+  appendFileSync(editedReposFileOf(sessionId), `${repoRoot}\n`)
+}
+
+// Read once: the next stop asks again only after another edit.
+const takeEditedRepos = (sessionId: string): Set<string> => {
+  const editedReposFile = editedReposFileOf(sessionId)
+  if (!existsSync(editedReposFile)) {
+    return new Set()
+  }
+  const editedRepos = readFileSync(editedReposFile, 'utf8').split('\n').filter(Boolean)
+  rmSync(editedReposFile)
+  return new Set(editedRepos)
+}
+
 const toRepoPath = (repoRoot: string, absolutePath: string): string =>
   relative(repoRoot, realpathSync(absolutePath)).split(sep).join('/')
 
@@ -104,10 +129,13 @@ const respondToRead = (filePath: string, offset: unknown, limit: unknown): HookO
 const isProblemOfFile = (problem: Problem, file: string): boolean =>
   problem.file === file || problem.message.includes(` ${file}#`)
 
-const respondToEdit = (filePath: string): HookOutput | null => {
+const respondToEdit = (filePath: string, sessionId: string | null): HookOutput | null => {
   const repoRoot = findMappedRepoRoot(dirname(filePath))
   if (repoRoot === null) {
     return null
+  }
+  if (sessionId !== null) {
+    recordEditedRepo(sessionId, repoRoot)
   }
   const file = toRepoPath(repoRoot, filePath)
   const fileErrors = checkRepo(repoRoot).filter(
@@ -124,12 +152,21 @@ const respondToEdit = (filePath: string): HookOutput | null => {
   )
 }
 
-const respondToStop = (cwd: string, isStopHookActive: boolean): HookOutput | null => {
+// Without a session id (an older Claude Code), every stop in a mapped repo is asked.
+const respondToStop = (
+  cwd: string,
+  sessionId: string | null,
+  isStopHookActive: boolean,
+): HookOutput | null => {
   if (isStopHookActive) {
     return null
   }
   const repoRoot = findMappedRepoRoot(cwd)
   if (repoRoot === null) {
+    return null
+  }
+  const didSessionEditRepo = sessionId === null || takeEditedRepos(sessionId).has(repoRoot)
+  if (!didSessionEditRepo) {
     return null
   }
   const errors = checkRepo(repoRoot).filter(
@@ -159,12 +196,16 @@ export const respondToHook = (input: HookInput): HookOutput | null => {
       return respondToRead(filePath, input.tool_input?.offset, input.tool_input?.limit)
     }
     if (EDITING_TOOL_NAMES.includes(input.tool_name ?? '')) {
-      return respondToEdit(filePath)
+      return respondToEdit(filePath, input.session_id ?? null)
     }
     return null
   }
   if (input.hook_event_name === HOOK_EVENTS.stop) {
-    return respondToStop(input.cwd ?? process.cwd(), input.stop_hook_active === true)
+    return respondToStop(
+      input.cwd ?? process.cwd(),
+      input.session_id ?? null,
+      input.stop_hook_active === true,
+    )
   }
   return null
 }
@@ -176,16 +217,15 @@ const parseHookInput = (inputText: string): HookInput | null => {
   if (!isObject || !('hook_event_name' in parsedInput)) {
     return null
   }
-  const { hook_event_name, cwd, tool_name, tool_input, stop_hook_active } = parsedInput as Record<
-    string,
-    unknown
-  >
+  const { hook_event_name, session_id, cwd, tool_name, tool_input, stop_hook_active } =
+    parsedInput as Record<string, unknown>
   if (typeof hook_event_name !== 'string') {
     return null
   }
   const isToolInputObject = typeof tool_input === 'object' && tool_input !== null
   return {
     hook_event_name,
+    session_id: typeof session_id === 'string' ? session_id : undefined,
     cwd: typeof cwd === 'string' ? cwd : undefined,
     tool_name: typeof tool_name === 'string' ? tool_name : undefined,
     tool_input: isToolInputObject ? (tool_input as HookInput['tool_input']) : undefined,
