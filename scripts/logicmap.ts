@@ -1160,6 +1160,7 @@ const createShowViews = (repoRoot: string) => {
 
   return {
     analysis,
+    problems,
     showDomainsMap,
     showOneDomain,
     showOneId,
@@ -1215,12 +1216,19 @@ export const listRuleSectionsInLines = (
   return views.isAnchoredFile(file) ? views.listFileRuleSections(file, lines) : []
 }
 
-// The rules whose uses or test sites in a file cover some of these lines: what the hook adds after an edit.
-export const listReferringRuleSectionsInLines = (
+// What the hook tells after an edit, from one analysis: every problem check reports, and the rules whose uses
+// or test sites in the file cover some of the changed lines.
+export const inspectEdit = (
   repoRoot: string,
   file: string,
   changedLines: LineRange[],
-): RuleSection[] => createShowViews(repoRoot).listReferringRuleSections(file, changedLines)
+): { problems: Problem[]; referringRuleSections: RuleSection[] } => {
+  const views = createShowViews(repoRoot)
+  return {
+    problems: views.problems,
+    referringRuleSections: views.listReferringRuleSections(file, changedLines),
+  }
+}
 
 // ---------- Diff: what changed under a rule's sites since their last ack ----------
 

@@ -109,3 +109,16 @@ what it says, a `§test` still failing when it breaks. Information, not an error
 Where: `scripts/hook.ts` (`readShownRuleLines`, `respondToEdit`, the session files)
 Run: green, 43 pass; strict tsc and biome clean. The first run failed on the test's own `1-3`: the `§test` site
 covers 1-4 (piece 1's note).
+
+## Piece 5: one analysis per edit
+What: `listReferringRuleSectionsInLines` becomes `inspectEdit(repoRoot, file, changedLines)`, which returns
+`check`'s problems and the referring rule sections from one `createShowViews` (its views now hand out `problems`).
+`respondToEdit` reads the changed lines first (a failing git call: none), calls `inspectEdit` once, and
+`listReliedOnRuleLines` takes the sections it found.
+Why: step 4's measure on a teamabled worktree: an Edit took 0.29–0.31 s against the installed hook's 0.15–0.19 s,
+the repo analysed twice (`checkRepo`, then the views). `checkRepo` is `findAllProblems` over `analyzeRepo`, which is
+what the views compute.
+Where: `scripts/logicmap.ts` (`createShowViews`'s return, after `listRuleSectionsInLines`), `scripts/hook.ts`
+(`listReliedOnRuleLines`, `respondToEdit`)
+Run: green, 43 pass; strict tsc and biome clean. On the teamabled worktree, best of three per Edit: 0.16 s for a file
+with no anchors (installed hook 0.15), 0.18 for the test file (0.16), 0.16 for `merge-direct-groups.ts` (0.15).

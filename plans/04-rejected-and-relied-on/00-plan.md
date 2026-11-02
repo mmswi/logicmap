@@ -42,16 +42,19 @@ Files: `scripts/logicmap.ts`, `scripts/logicmap.test.ts`
 Files: `scripts/logicmap.ts`, `scripts/hook.ts`, `scripts/logicmap.test.ts`
 
 ### 3. The docs
-- [ ] SKILL.md: `why`'s rejected line; the hook's Edit bullet; "Changing anchored code" says a `uses` or `test`
+- [x] SKILL.md: `why`'s rejected line; the hook's Edit bullet; "Changing anchored code" says a `uses` or `test`
   site's code is checked by reading its rule, which the hook names.
-- [ ] README's hook line; `hook.ts`'s header comment.
+- [x] README's hook line; `hook.ts`'s header comment.
 Files: `SKILL.md`, `README.md`, `scripts/hook.ts`
 
 ### 4. Measure on teamabled
-- [ ] On a detached worktree of teamabled in the scratchpad: one edit under a `§uses` site, one under a `§test` site,
+- [x] On a detached worktree of teamabled in the scratchpad: one edit under a `§uses` site, one under a `§test` site,
   one under nothing; the hook's output and time each.
 - [ ] Results here; merge into the installed clone; its tests; the board's rows #14 and #12's safety gap.
 
 ## Results
 
 ## Revisions
+- 2026-11-02, the agent: step 4's measure ran before step 3, and added step 2's piece 5 (one analysis per edit):
+  the first version of step 2 analysed the repo twice per Edit, 0.29–0.31 s against the installed hook's
+  0.15–0.19 s; after piece 5, 0.16–0.18 s against 0.15–0.16 s.

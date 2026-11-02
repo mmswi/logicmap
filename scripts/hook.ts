@@ -12,7 +12,7 @@ import {
   checkRepo,
   findNewestLinesChange,
   formatProblem,
-  listReferringRuleSectionsInLines,
+  inspectEdit,
   listRuleSectionsInLines,
 } from './logicmap.ts'
 
@@ -23,7 +23,9 @@ import {
  *                                           time a session reads them, then by id; and, the first time
  *                                           it reads a committed code file, the newest change of the
  *                                           lines read and the logicmap why command
- *   PostToolUse Edit / MultiEdit / Write  → what check reports for the edited file's rules
+ *   PostToolUse Edit / MultiEdit / Write  → what check reports for the edited file's rules; and the rules
+ *                                           whose uses or test sites cover lines changed since HEAD, which
+ *                                           no lock fingerprints, once per file and session
  *   Stop                                  → check's errors, once, so the agent resolves them or says
  *                                           why they stay; only for a session that edited the repo
  *                                           since its last stop
@@ -242,65 +244,63 @@ const isProblemOfFile = (problem: Problem, file: string): boolean =>
 // A hunk header of git diff -U0: where its lines start in the file as it is now, and how many (1 when unsaid).
 const DIFF_HUNK_HEADER_PATTERN = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@/
 
-// The lines of the file that differ from HEAD; a removal is the line before it. Nothing for a file HEAD lacks.
-const listChangedLineRanges = (repoRoot: string, file: string): LineRange[] =>
-  execFileSync('git', ['diff', '-U0', '--no-color', '--no-ext-diff', 'HEAD', '--', file], {
-    cwd: repoRoot,
-    encoding: 'utf8',
-    stdio: ['ignore', 'pipe', 'ignore'],
-  })
-    .split('\n')
-    .flatMap((diffLine) => {
-      const [, firstLineText, lineCountText = '1'] = DIFF_HUNK_HEADER_PATTERN.exec(diffLine) ?? []
-      if (firstLineText === undefined) {
-        return []
-      }
-      const firstLine = Math.max(Number(firstLineText), 1)
-      return [{ firstLine, lastLine: firstLine + Math.max(Number(lineCountText), 1) - 1 }]
+// The lines of the file that differ from HEAD; a removal is the line before it. None for a file HEAD lacks, or
+// when git fails: that costs the note on them only.
+const listChangedLineRanges = (repoRoot: string, file: string): LineRange[] => {
+  try {
+    return execFileSync('git', ['diff', '-U0', '--no-color', '--no-ext-diff', 'HEAD', '--', file], {
+      cwd: repoRoot,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
     })
+      .split('\n')
+      .flatMap((diffLine) => {
+        const [, firstLineText, lineCountText = '1'] = DIFF_HUNK_HEADER_PATTERN.exec(diffLine) ?? []
+        if (firstLineText === undefined) {
+          return []
+        }
+        const firstLine = Math.max(Number(firstLineText), 1)
+        return [{ firstLine, lastLine: firstLine + Math.max(Number(lineCountText), 1) - 1 }]
+      })
+  } catch {
+    return []
+  }
+}
 
 const reliedOnRuleLineOf = (repoRoot: string, file: string, ruleSection: RuleSection): string =>
   `${repoRoot} ${file} ${ruleSection.id}@${ruleSection.version ?? '?'}`
 
 // The rules whose uses or test sites cover lines changed since HEAD, which no lock fingerprints: each once per
-// file and session, and none the file's errors already name. A failing git call costs this note only.
+// file and session, and none the file's errors already name.
 const listReliedOnRuleLines = (
   repoRoot: string,
   file: string,
+  referringRuleSections: RuleSection[],
   fileErrors: Problem[],
   sessionId: string | null,
 ): string[] => {
-  try {
-    const reliedOnRulesFile = sessionId === null ? null : reliedOnRulesFileOf(sessionId)
-    const namedRuleLines =
-      reliedOnRulesFile === null ? new Set<string>() : readSessionFileLines(reliedOnRulesFile)
-    const erroredIds = new Set(fileErrors.map((problem) => problem.id))
-    const changedLines = listChangedLineRanges(repoRoot, file)
-    const newRuleSections = (
-      changedLines.length === 0
-        ? []
-        : listReferringRuleSectionsInLines(repoRoot, file, changedLines)
-    ).filter(
-      (ruleSection) =>
-        !erroredIds.has(ruleSection.id) &&
-        !namedRuleLines.has(reliedOnRuleLineOf(repoRoot, file, ruleSection)),
-    )
-    if (newRuleSections.length === 0) {
-      return []
-    }
-    if (reliedOnRulesFile !== null) {
-      appendToSessionFile(
-        reliedOnRulesFile,
-        newRuleSections.map((ruleSection) => reliedOnRuleLineOf(repoRoot, file, ruleSection)),
-      )
-    }
-    return [
-      `logicmap: the edit to ${file} changed lines under these rules' uses or test sites, which check doesn't fingerprint. Read each rule against the new code (logicmap show <id>): the code under a §uses site must still rely on what the rule says, and a §test must still fail when the rule breaks.`,
-      ...newRuleSections.map((ruleSection) => ruleSection.text),
-    ]
-  } catch {
+  const reliedOnRulesFile = sessionId === null ? null : reliedOnRulesFileOf(sessionId)
+  const namedRuleLines =
+    reliedOnRulesFile === null ? new Set<string>() : readSessionFileLines(reliedOnRulesFile)
+  const erroredIds = new Set(fileErrors.map((problem) => problem.id))
+  const newRuleSections = referringRuleSections.filter(
+    (ruleSection) =>
+      !erroredIds.has(ruleSection.id) &&
+      !namedRuleLines.has(reliedOnRuleLineOf(repoRoot, file, ruleSection)),
+  )
+  if (newRuleSections.length === 0) {
     return []
   }
+  if (reliedOnRulesFile !== null) {
+    appendToSessionFile(
+      reliedOnRulesFile,
+      newRuleSections.map((ruleSection) => reliedOnRuleLineOf(repoRoot, file, ruleSection)),
+    )
+  }
+  return [
+    `logicmap: the edit to ${file} changed lines under these rules' uses or test sites, which check doesn't fingerprint. Read each rule against the new code (logicmap show <id>): the code under a §uses site must still rely on what the rule says, and a §test must still fail when the rule breaks.`,
+    ...newRuleSections.map((ruleSection) => ruleSection.text),
+  ]
 }
 
 const respondToEdit = (filePath: string, sessionId: string | null): HookOutput | null => {
@@ -312,10 +312,21 @@ const respondToEdit = (filePath: string, sessionId: string | null): HookOutput |
     recordEditedRepo(sessionId, repoRoot)
   }
   const file = toRepoPath(repoRoot, filePath)
-  const fileErrors = checkRepo(repoRoot).filter(
+  const { problems, referringRuleSections } = inspectEdit(
+    repoRoot,
+    file,
+    listChangedLineRanges(repoRoot, file),
+  )
+  const fileErrors = problems.filter(
     (problem) => problem.severity === PROBLEM_SEVERITIES.error && isProblemOfFile(problem, file),
   )
-  const reliedOnRuleLines = listReliedOnRuleLines(repoRoot, file, fileErrors, sessionId)
+  const reliedOnRuleLines = listReliedOnRuleLines(
+    repoRoot,
+    file,
+    referringRuleSections,
+    fileErrors,
+    sessionId,
+  )
   if (fileErrors.length === 0 && reliedOnRuleLines.length === 0) {
     return null
   }

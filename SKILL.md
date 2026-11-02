@@ -39,12 +39,13 @@ bun ~/.claude/skills/logicmap/scripts/logicmap.ts why <file>:<line>[-<line>] | <
 
 `why` says why code is as it is and how it got there, from git and the pieces recorded with each commit:
 
-- `why <file>:<line>` or `<file>:<start>-<end>`: the rules covering the lines, each with its why; then every
-  commit that changed them, newest first, each with the piece recorded with it (its What and Why) and its
-  task's goal. The lines are the file as it is now, uncommitted edits included.
+- `why <file>:<line>` or `<file>:<start>-<end>`: the rules covering the lines, each with its why and the
+  alternatives it rejected; then every commit that changed them, newest first, each with the piece recorded
+  with it (its What and Why) and its task's goal. The lines are the file as it is now, uncommitted edits
+  included.
 - `why <file>:<name>`: the same for the top-level declaration of that name.
-- `why <id>`: the rule, its why and its history; then every commit that changed its entry, each with the
-  piece naming the id.
+- `why <id>`: the rule, its why, what it rejected and its history; then every commit that changed its entry,
+  each with the piece naming the id.
 
 Run it before changing code this session didn't write, and first when a line misbehaves: the newest commit of
 the lines is where to look.
@@ -99,6 +100,11 @@ After every edit to anchored code, run `check` and resolve each line it prints:
   (which also drops the `gone` lock lines). A retired id is never reused.
 - Any other error names its fix in the message (`orphan-entry`, `duplicate-definition`,
   `step-without-site`, `undocumented`, `malformed-anchor`, ...).
+
+`check` fingerprints only the sites that define a rule. Code under a `uses` or `test` site is checked by
+reading: after an edit there, read the rule (`show <id>`) against the new code. The code under a `uses` site
+must still rely on what the rule says, and a `test` must still fail when the rule breaks. The hook names
+those rules after the edit; there is nothing to ack.
 
 Done when `check` exits 0. A version moves only when the meaning changes; reformatting and refactors
 that keep the meaning end in `ack`.
@@ -310,7 +316,8 @@ Rules:
   first time a session reads a rule at its version, then named by id in one line. The first time a
   session reads a committed code file, one more line: the newest commit of the lines read, the piece
   recorded with it, and the `why` command for them;
-- after an `Edit`, `MultiEdit` or `Write`, the errors `check` reports in that file, with what to do;
+- after an `Edit`, `MultiEdit` or `Write`, the errors `check` reports in that file, with what to do, and
+  the rules whose `uses` or `test` sites cover the lines changed since HEAD, once per file and session;
 - at `Stop`, `check`'s errors, once, for a session that edited a file in the repo since its last stop:
   the agent resolves them, or tells the user why they stay. A session that only read is not asked, so one
   session's work in progress does not stop the others.
