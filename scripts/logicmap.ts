@@ -99,6 +99,8 @@ export type LedgerEntry = {
   provenance: EntryProvenance
   what: string
   claim: string
+  // Why no test proves it, when someone wrote so; such an entry raises no untested warning.
+  untestedReason: string
   steps: FlowStep[]
   text: string
 }
@@ -219,6 +221,7 @@ const ENTRY_FIELD_NAMES = [
   'rejected',
   'breaks-if',
   'revisit-if',
+  'untested',
   'source',
   'steps',
   'history',
@@ -382,6 +385,7 @@ const parseEntry = (entryBlock: EntryBlock): { entry: LedgerEntry; problems: Pro
       provenance,
       what,
       claim,
+      untestedReason: fieldByName.get('untested')?.text ?? '',
       steps,
       text,
     },
@@ -537,8 +541,9 @@ const checkEntryAgainstAnchors = (entry: LedgerEntry, entryAnchors: Anchor[]): P
   }
   const isProvableKind = entry.kind === ENTRY_KINDS.edge || entry.kind === ENTRY_KINDS.invariant
   const hasTestAnchor = entryAnchors.some((anchor) => anchor.role === ANCHOR_ROLES.test)
-  if (isProvableKind && !hasTestAnchor) {
-    const message = `${entry.id} is an ${entry.kind} no test proves: put §test ${entry.id}@${entry.version} above the test that does, or write one`
+  const isUntestedOnPurpose = entry.untestedReason !== ''
+  if (isProvableKind && !hasTestAnchor && !isUntestedOnPurpose) {
+    const message = `${entry.id} is an ${entry.kind} no test proves: put §test ${entry.id}@${entry.version} above the test that does, write one, or say why none can in untested:`
     problems.push(warningAt(PROBLEM_CODES.untested, entry, entry.id, message))
   }
   return problems

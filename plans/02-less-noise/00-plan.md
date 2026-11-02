@@ -85,8 +85,8 @@ Files: `scripts/logicmap.ts`, `scripts/logicmap.test.ts`
 Files: `scripts/logicmap.ts`, `scripts/logicmap.test.ts`
 
 ### 5. `untested:` names why no test proves an entry
-- [ ] Failing test: an edge with `untested: <reason>` raises no warning; one without still does.
-- [ ] The field in `ENTRY_FIELD_NAMES`; `checkEntryAgainstAnchors` reads it.
+- [x] Failing test: an edge with `untested: <reason>` raises no warning; one without still does.
+- [x] The field in `ENTRY_FIELD_NAMES`; `checkEntryAgainstAnchors` reads it.
 Files: `scripts/logicmap.ts`, `scripts/logicmap.test.ts`
 
 ### 6. The hook shows a rule once per session

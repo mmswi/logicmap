@@ -770,6 +770,23 @@ describe('coverage', () => {
     })
     expect(describeWarnings(repoRoot)).toEqual([])
   })
+
+  test('an entry that says why no test proves it, in untested:, is no warning', () => {
+    const repoRoot = createFixtureRepo({
+      'src/room.ts': ['// §edge sync.close-during-join@1', 'const undoJoin = () => {}', ''].join(
+        '\n',
+      ),
+      'logicmap/sync.md': closeDuringJoinEntry(1).replace(
+        'source: fixture',
+        'untested: the close lands between two awaits no test can stop at\nsource: fixture',
+      ),
+    })
+
+    expect(describeWarnings(repoRoot)).toEqual([])
+    expect(showLogicMap(repoRoot, 'sync.close-during-join')).toContain(
+      'untested: the close lands between two awaits no test can stop at',
+    )
+  })
 })
 
 describe('show', () => {
