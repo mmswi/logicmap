@@ -18,6 +18,7 @@ import {
   type Problem,
   ackIds,
   checkRepo,
+  diffLogicMap,
   showLogicMap,
 } from './logicmap.ts'
 
@@ -1010,6 +1011,63 @@ describe('claims', () => {
     })
 
     expect(describeWarnings(repoRoot)).toEqual(['long-what logicmap/sync.md:4'])
+  })
+})
+
+describe('diff', () => {
+  test("a changed site's hunks since the commit of its ack; from HEAD while the ack isn't committed", () => {
+    const roomLines = [
+      '// §edge sync.close-during-join@1',
+      'if (closedEarly) {',
+      '  joined.removeConnection(connection)',
+      '}',
+      ...Array.from({ length: 10 }, (_, lineIndex) => `const unrelated${lineIndex} = ${lineIndex}`),
+      '',
+    ]
+    const repoRoot = createFixtureRepo({
+      'src/room.ts': roomLines.join('\n'),
+      'logicmap/sync.md': closeDuringJoinEntry(1),
+    })
+    ackIds(repoRoot, ['sync.close-during-join'])
+    const commitAll = (): void => {
+      execFileSync('git', ['add', '-A'], { cwd: repoRoot })
+      execFileSync(
+        'git',
+        [
+          '-c',
+          'user.name=fixture',
+          '-c',
+          'user.email=fixture@example.com',
+          'commit',
+          '--quiet',
+          '-m',
+          'ack',
+        ],
+        { cwd: repoRoot },
+      )
+    }
+    commitAll()
+    const writeRoom = (): void =>
+      writeFixtureFiles(repoRoot, { 'src/room.ts': roomLines.join('\n') })
+
+    expect(diffLogicMap(repoRoot, 'sync.close-during-join')).toBe(
+      'sync.close-during-join: no site in the lock changed since its last ack',
+    )
+
+    roomLines[2] = '  joined.dropConnection(connection)'
+    roomLines[12] = 'const unrelated8 = 80'
+    writeRoom()
+    const committedAckDiff = diffLogicMap(repoRoot, 'sync.close-during-join')
+    expect(committedAckDiff).toContain('since the ack in')
+    expect(committedAckDiff).toContain('+  joined.dropConnection(connection)')
+    expect(committedAckDiff).not.toContain('unrelated8 = 80')
+
+    ackIds(repoRoot, ['sync.close-during-join'])
+    roomLines[2] = '  joined.forgetConnection(connection)'
+    writeRoom()
+    const uncommittedAckDiff = diffLogicMap(repoRoot, 'sync.close-during-join')
+    expect(uncommittedAckDiff).toContain('the ack is not committed yet, so from HEAD')
+    expect(uncommittedAckDiff).toContain('+  joined.forgetConnection(connection)')
   })
 })
 

@@ -96,9 +96,9 @@ Files: `scripts/logicmap.ts`, `scripts/logicmap.test.ts`
 Files: `scripts/hook.ts`, `scripts/logicmap.ts`, `scripts/logicmap.test.ts`
 
 ### 7. `logicmap diff <id>`
-- [ ] Failing test: after a committed ack and an edit, `diff` prints the hunk under the changed site, not
+- [x] Failing test: after a committed ack and an edit, `diff` prints the hunk under the changed site, not
   a hunk elsewhere in the file; with the ack uncommitted it diffs from HEAD and says so.
-- [ ] The command; parked on the board instead if it runs past about 60 lines.
+- [x] The command; parked on the board instead if it runs past about 60 lines.
 Files: `scripts/logicmap.ts`, `scripts/logicmap.test.ts`
 
 ### 8. The docs and the install

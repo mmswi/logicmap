@@ -1197,6 +1197,77 @@ export const listRuleSectionsInLines = (
   return views.isAnchoredFile(file) ? views.listFileRuleSections(file, lines) : []
 }
 
+// ---------- Diff: what changed under a rule's sites since their last ack ----------
+
+const runGit = (repoRoot: string, gitArguments: string[]): string =>
+  execFileSync('git', gitArguments, {
+    cwd: repoRoot,
+    encoding: 'utf8',
+    maxBuffer: 64 * 1024 * 1024,
+    stdio: ['ignore', 'pipe', 'ignore'],
+  })
+
+// The commit that wrote this lock line, or null while HEAD's lock doesn't hold it (an ack since HEAD).
+const findAckCommit = (repoRoot: string, lockFile: string, lockLine: string): string | null => {
+  try {
+    const committedLockLines = runGit(repoRoot, ['show', `HEAD:${lockFile}`]).split('\n')
+    if (!committedLockLines.includes(lockLine)) {
+      return null
+    }
+    const ackCommit = runGit(repoRoot, ['log', '-1', '--format=%h', '-S', lockLine, '--', lockFile])
+    return ackCommit.trim() === '' ? null : ackCommit.trim()
+  } catch {
+    return null
+  }
+}
+
+const HUNK_START_PATTERN = /^(?=@@ )/m
+const HUNK_NEW_LINES_PATTERN = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@/
+
+// The hunks of a file's diff whose lines in the file as it is now meet these lines.
+const hunksMeetingLines = (diffText: string, lines: LineRange): string[] =>
+  diffText.split(HUNK_START_PATTERN).filter((hunk) => {
+    const [, firstLineText, lineCountText = '1'] = HUNK_NEW_LINES_PATTERN.exec(hunk) ?? []
+    if (firstLineText === undefined) {
+      return false
+    }
+    const firstLine = Number(firstLineText)
+    // A hunk that only removes lines (+N,0) sits after line N.
+    const lastLine = firstLine + Math.max(Number(lineCountText), 1) - 1
+    return doLineRangesMeet({ firstLine, lastLine }, lines)
+  })
+
+// For each site of the id whose code or entry differs from its lock line, the git diff of its file from
+// the commit of its ack, the hunks that meet its lines: what to re-read before acking it again.
+export const diffLogicMap = (repoRoot: string, id: string): string => {
+  const { lockSites } = analyzeRepo(repoRoot)
+  const lockedSitesByKey = readLock(repoRoot)
+  const changedSiteSections = lockSites
+    .filter((lockSite) => lockSite.isInLock && lockSite.id === id)
+    .flatMap((lockSite) => {
+      const lockedSite = lockedSitesByKey.get(lockSite.key)
+      if (lockedSite === undefined || isAsLocked(lockSite, lockedSite)) {
+        return []
+      }
+      const lockLine = `${lockSite.key} ${lockedSite.version} ${lockedSite.fingerprint}`
+      const ackCommit = findAckCommit(repoRoot, lockedSite.file, lockLine)
+      const sinceNote =
+        ackCommit === null
+          ? 'the ack is not committed yet, so from HEAD'
+          : `since the ack in ${ackCommit}`
+      const diffText = runGit(repoRoot, ['diff', '-U2', ackCommit ?? 'HEAD', '--', lockSite.file])
+      const siteLines = { firstLine: lockSite.line, lastLine: lockSite.lastLine }
+      const hunks = hunksMeetingLines(diffText, siteLines)
+      const hunkLines =
+        hunks.length === 0 ? ['  no hunk meets these lines (an untracked file has no diff)'] : hunks
+      const headingLine = `${lockSite.file}:${describeLineRange(siteLines)}  ${lockSite.label}, ${sinceNote}:`
+      return [[headingLine, ...hunkLines].join('\n').trimEnd()]
+    })
+  return changedSiteSections.length === 0
+    ? `${id}: no site in the lock changed since its last ack`
+    : changedSiteSections.join('\n\n')
+}
+
 // ---------- Command line ----------
 
 const USAGE = [
@@ -1204,6 +1275,7 @@ const USAGE = [
   "       bun logicmap.ts ack <id>...         record these ids' code and entries as verified",
   '       bun logicmap.ts show [<domain> | <id> | <file>[:<line>[-<line>]]]',
   "                                           every domain; a domain's rules; one rule and its sites; a file's rules",
+  "       bun logicmap.ts diff <id>           what changed under the id's sites since their last ack",
 ].join('\n')
 
 const findRepoRoot = (): string =>
@@ -1246,6 +1318,10 @@ const runCommandLine = (commandLineArguments: string[]): number => {
       return 1
     }
     console.log(`logicmap: acked ${ackedIds.join(', ')}`)
+    return 0
+  }
+  if (command === 'diff' && commandArguments.length === 1) {
+    console.log(diffLogicMap(repoRoot, commandArguments[0] ?? ''))
     return 0
   }
   if (command === 'show') {
