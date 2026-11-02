@@ -85,6 +85,16 @@ const closeDuringJoinEntry = (version: number): string =>
     '',
   ].join('\n')
 
+const pooledBufferSliceEntry = [
+  '## sync.pooled-buffer-slice',
+  'kind: edge',
+  'version: 1',
+  'what: ws may hand a message over as a slice of a pooled buffer.',
+  'why: The decoder must read exactly this message.',
+  'source: fixture',
+  '',
+].join('\n')
+
 afterAll(() => {
   for (const repoRoot of fixtureRepoRoots) {
     rmSync(repoRoot, { recursive: true, force: true })
@@ -452,6 +462,91 @@ describe('lock', () => {
       'stale-pin src/room.test.ts:1',
       'stale-pin src/room.ts:1',
     ])
+  })
+
+  test('the code fingerprint leaves out comment lines, not a #private or --count line', () => {
+    const roomLines = [
+      'export class Room {',
+      '  // §edge sync.close-during-join@1',
+      '  closeEarly() {',
+      '    // The room still holds a socket that closed while it loaded.',
+      '    /*',
+      '      join → close → load',
+      '    */',
+      '    #closedCount = 0',
+      '    --retries',
+      '  }',
+      '}',
+      '',
+    ]
+    const repoRoot = createFixtureRepo({
+      'src/room.ts': roomLines.join('\n'),
+      'logicmap/sync.md': closeDuringJoinEntry(1),
+    })
+    ackIds(repoRoot, ['sync.close-during-join'])
+    const replaceRoomLine = (lineIndex: number, replacementLine: string): void => {
+      roomLines[lineIndex] = replacementLine
+      writeFixtureFiles(repoRoot, { 'src/room.ts': roomLines.join('\n') })
+    }
+
+    expect(readFixtureFile(repoRoot, 'logicmap/sync.lock')).toMatch(
+      /^sync\.close-during-join edge src\/room\.ts#1 1 v2:[0-9a-f]{12}$/m,
+    )
+    replaceRoomLine(3, '    // A socket that closed while the room loaded is still in it.')
+    replaceRoomLine(5, '      join → close → load → remove')
+    expect(describeLockProblems(repoRoot)).toEqual([])
+
+    replaceRoomLine(7, '    #closedCount = 1')
+    expect(describeLockProblems(repoRoot)).toEqual(['changed src/room.ts:2'])
+
+    ackIds(repoRoot, ['sync.close-during-join'])
+    replaceRoomLine(8, '    --attempts')
+    expect(describeLockProblems(repoRoot)).toEqual(['changed src/room.ts:2'])
+  })
+
+  test('a lock line written before comments left the fingerprint still holds, and an ack of its domain renews it', () => {
+    const roomLines = [
+      '// §edge sync.close-during-join@1',
+      'if (closedEarly) {',
+      '  // A socket that closed while the room loaded is still in it.',
+      '  joined.removeConnection(connection)',
+      '}',
+      '// §edge sync.pooled-buffer-slice@1',
+      'const data = new Uint8Array(raw.buffer, raw.byteOffset, raw.byteLength)',
+      '',
+    ]
+    // As the checker of before wrote it for this code: the fingerprints carry no v2: prefix.
+    const lockLinesOfBefore = [
+      'sync.close-during-join edge src/room.ts#1 1 4f767cc9f37f',
+      'sync.close-during-join entry logicmap/sync.md#1 1 a27e01982a37',
+      'sync.pooled-buffer-slice edge src/room.ts#1 1 b2d60a134c0c',
+      'sync.pooled-buffer-slice entry logicmap/sync.md#1 1 1e304c5d6b94',
+    ]
+    const repoRoot = createFixtureRepo({
+      'src/room.ts': roomLines.join('\n'),
+      'logicmap/sync.md': [closeDuringJoinEntry(1), pooledBufferSliceEntry].join('\n'),
+      'logicmap/sync.lock': `${lockLinesOfBefore.join('\n')}\n`,
+    })
+    const lockLineOf = (key: string): string | undefined =>
+      readFixtureFile(repoRoot, 'logicmap/sync.lock')
+        .split('\n')
+        .find((lockLine) => lockLine.startsWith(key))
+
+    expect(describeLockProblems(repoRoot)).toEqual([])
+
+    roomLines[3] = '  joined.dropConnection(connection)'
+    writeFixtureFiles(repoRoot, { 'src/room.ts': roomLines.join('\n') })
+    ackIds(repoRoot, ['sync.pooled-buffer-slice'])
+    expect(lockLineOf('sync.close-during-join edge')).toBe(lockLinesOfBefore[0])
+    expect(lockLineOf('sync.pooled-buffer-slice edge')).toMatch(/ 1 v2:[0-9a-f]{12}$/)
+    expect(describeLockProblems(repoRoot)).toEqual(['changed src/room.ts:1'])
+
+    roomLines[3] = '  joined.removeConnection(connection)'
+    writeFixtureFiles(repoRoot, { 'src/room.ts': roomLines.join('\n') })
+    ackIds(repoRoot, ['sync.pooled-buffer-slice'])
+    expect(lockLineOf('sync.close-during-join edge')).toMatch(/ 1 v2:[0-9a-f]{12}$/)
+    expect(lockLineOf('sync.close-during-join entry')).toBe(lockLinesOfBefore[1])
+    expect(describeLockProblems(repoRoot)).toEqual([])
   })
 
   test('an anchor written as a JSX comment covers the element below it', () => {

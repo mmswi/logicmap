@@ -64,11 +64,11 @@ Measured on teamabled, 2026-11-02:
 Files: `scripts/logicmap.ts`, `scripts/logicmap.test.ts`
 
 ### 2. The code fingerprint leaves out comments
-- [ ] Failing test: after an ack, rewording a `//` line or a line of a `/* */` block inside the anchored
+- [x] Failing test: after an ack, rewording a `//` line or a line of a `/* */` block inside the anchored
   block is no change; editing a `#private` or `--count` line is; a lock line written before (no `v2:`)
   still matches the code it was taken from; an ack writes `v2:`; an ack rewrites another kept line of its
   domain whose old fingerprint matches with `v2:`, and leaves one that doesn't match as it was.
-- [ ] `fingerprintCode` (comments out) beside the text fingerprint; `v2:` on what an ack writes; the
+- [x] `fingerprintCode` (comments out) beside the text fingerprint; `v2:` on what an ack writes; the
   comparison by the line's form; the upgrade of matching kept lines.
 Files: `scripts/logicmap.ts`, `scripts/logicmap.test.ts`
 

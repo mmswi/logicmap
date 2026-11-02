@@ -556,6 +556,8 @@ type LockSite = {
   id: string
   version: number
   fingerprint: string
+  // As lock lines written before comments left the code fingerprint hold it; an entry's is its fingerprint.
+  fingerprintWithComments: string
   file: string
   line: number
   lastLine: number
@@ -570,7 +572,7 @@ const ANCHOR_PATTERN_GLOBAL = new RegExp(ANCHOR_SOURCE, 'g')
 const ANCHOR_RESIDUE_PATTERN = /^(\/\/|#|--|\*|\/\*|\*\/|\/\*\s*\*\/|\{\/\*\s*\*\/\}|<!--\s*-->)?$/
 
 // Whitespace and anchors are left out, so reformatting a block, moving another pin, or adding an
-// anchor inside the block changes nothing.
+// anchor inside the block changes nothing. An entry's text is fingerprinted this way.
 const fingerprintLines = (lines: string[]): string => {
   const normalizedText = lines
     .map((line) => line.replace(ANCHOR_PATTERN_GLOBAL, '').replace(/\s+/g, ' ').trim())
@@ -578,6 +580,33 @@ const fingerprintLines = (lines: string[]): string => {
     .join('\n')
   return createHash('sha256').update(normalizedText).digest('hex').slice(0, 12)
 }
+
+// Marks a code fingerprint taken without comments; a lock line without it holds one taken with them.
+const CODE_FINGERPRINT_PREFIX = 'v2:'
+// `# ` and `-- ` but not `#private` or `--count`; a comment at the end of a code line stays in, since
+// a `//` can sit inside a string.
+const COMMENT_ONLY_LINE_PATTERN = /^\s*(\/\/|#(\s|!|$)|--(\s|$)|<!--)/
+const BLOCK_COMMENT_OPENING_LINE_PATTERN = /^\s*\{?\/\*/
+const BLOCK_COMMENT_END = '*/'
+
+const dropCommentLines = (lines: string[]): string[] => {
+  const codeLines: string[] = []
+  let isInsideBlockComment = false
+  for (const line of lines) {
+    if (isInsideBlockComment || BLOCK_COMMENT_OPENING_LINE_PATTERN.test(line)) {
+      isInsideBlockComment = !line.includes(BLOCK_COMMENT_END)
+      continue
+    }
+    if (!COMMENT_ONLY_LINE_PATTERN.test(line)) {
+      codeLines.push(line)
+    }
+  }
+  return codeLines
+}
+
+// Rewording a comment in the block changes nothing either.
+const fingerprintCode = (lines: string[]): string =>
+  `${CODE_FINGERPRINT_PREFIX}${fingerprintLines(dropCommentLines(lines))}`
 
 // A JSX comment (`{/* ... */}`) counts too: among JSX children it is the only comment that stays one.
 const COMMENT_LINE_PATTERN = /^\s*(\/\/|\/\*|\*|#|--|<!--|\{\/\*)/
@@ -677,7 +706,8 @@ const collectLockSites = (
       isInLock: isDefiningRole(anchor.role),
       id: anchor.id,
       version: anchor.version,
-      fingerprint: fingerprintLines(anchoredLines),
+      fingerprint: fingerprintCode(anchoredLines),
+      fingerprintWithComments: fingerprintLines(anchoredLines),
       file: anchor.file,
       line: anchor.line,
       lastLine: anchoredLineRange === null ? anchor.line : anchoredLineRange.lastLineIndex + 1,
@@ -685,12 +715,14 @@ const collectLockSites = (
     })
   }
   for (const entry of entriesById.values()) {
+    const entryFingerprint = fingerprintLines(entry.text.split('\n'))
     lockSites.push({
       key: `${entry.id} entry ${entry.file}#1`,
       isInLock: true,
       id: entry.id,
       version: entry.version ?? 0,
-      fingerprint: fingerprintLines(entry.text.split('\n')),
+      fingerprint: entryFingerprint,
+      fingerprintWithComments: entryFingerprint,
       file: entry.file,
       line: entry.line,
       lastLine: entry.line + entry.text.split('\n').length - 1,
@@ -746,6 +778,15 @@ const readLock = (repoRoot: string): Map<string, LockedSite> => {
   return lockedSitesByKey
 }
 
+// A lock line compares by the fingerprint it holds: taken without comments, or with them, before.
+const isAsLocked = (lockSite: LockSite, lockedSite: LockedSite): boolean => {
+  const isLockedWithoutComments = lockedSite.fingerprint.startsWith(CODE_FINGERPRINT_PREFIX)
+  const currentFingerprint = isLockedWithoutComments
+    ? lockSite.fingerprint
+    : lockSite.fingerprintWithComments
+  return lockedSite.version === lockSite.version && lockedSite.fingerprint === currentFingerprint
+}
+
 const checkLock = (lockSites: LockSite[], lockedSitesByKey: Map<string, LockedSite>): Problem[] => {
   const problems: Problem[] = []
   const sitesInLock = lockSites.filter((lockSite) => lockSite.isInLock)
@@ -756,9 +797,7 @@ const checkLock = (lockSites: LockSite[], lockedSitesByKey: Map<string, LockedSi
       problems.push(errorAt(PROBLEM_CODES.unacked, lockSite, lockSite.id, message))
       continue
     }
-    const isChanged =
-      lockedSite.version !== lockSite.version || lockedSite.fingerprint !== lockSite.fingerprint
-    if (isChanged) {
+    if (!isAsLocked(lockSite, lockedSite)) {
       const message = `${lockSite.label} changed since the last ack: re-read the entry ${lockSite.id}; it still holds → ack ${lockSite.id}; its meaning changed → bump its version`
       problems.push(errorAt(PROBLEM_CODES.changed, lockSite, lockSite.id, message))
     }
@@ -854,9 +893,19 @@ export const ackIds = (
     return { ackedIds: [], blockingProblems: blockingProblems.sort(byFileThenLine) }
   }
 
+  const sitesInLockByKey = new Map(
+    lockSites.filter((lockSite) => lockSite.isInLock).map((lockSite) => [lockSite.key, lockSite]),
+  )
+  // A kept line whose code is as it was locked takes the fingerprint an ack writes now: the same code,
+  // so nothing is acked unread, and lines taken with comments die out.
   const keptLockLines = [...lockedSitesByKey]
     .filter(([key]) => !requestedIds.has(idOfLockKey(key)))
-    .map(([key, lockedSite]) => `${key} ${lockedSite.version} ${lockedSite.fingerprint}`)
+    .map(([key, lockedSite]) => {
+      const lockSite = sitesInLockByKey.get(key)
+      const isUnchanged = lockSite !== undefined && isAsLocked(lockSite, lockedSite)
+      const fingerprint = isUnchanged ? lockSite.fingerprint : lockedSite.fingerprint
+      return `${key} ${lockedSite.version} ${fingerprint}`
+    })
   const ackedLockLines = lockSites
     .filter((lockSite) => lockSite.isInLock && requestedIds.has(lockSite.id))
     .map((lockSite) => `${lockSite.key} ${lockSite.version} ${lockSite.fingerprint}`)
