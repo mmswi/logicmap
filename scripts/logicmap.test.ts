@@ -600,6 +600,37 @@ describe('lock', () => {
     expect(describeLockProblems(flowRepoRoot)).toEqual(['unacked src/open.ts:1'])
   })
 
+  test('a changed site over 60 lines says how many it covers; a shorter one does not', () => {
+    const longBlockLines = Array.from({ length: 60 }, (_, lineIndex) => `  step${lineIndex}()`)
+    const roomLines = [
+      '// §edge sync.close-during-join@1',
+      'export const joinSocket = () => {',
+      ...longBlockLines,
+      '}',
+      '// §edge sync.pooled-buffer-slice@1',
+      'const data = new Uint8Array(raw.buffer, raw.byteOffset, raw.byteLength)',
+      '',
+    ]
+    const repoRoot = createFixtureRepo({
+      'src/room.ts': roomLines.join('\n'),
+      'logicmap/sync.md': [closeDuringJoinEntry(1), pooledBufferSliceEntry].join('\n'),
+    })
+    ackIds(repoRoot, ['sync.close-during-join', 'sync.pooled-buffer-slice'])
+    writeFixtureFiles(repoRoot, {
+      'src/room.ts': roomLines
+        .join('\n')
+        .replace('step3()', 'stepThree()')
+        .replace('raw.', 'bytes.'),
+    })
+    const changedMessages = checkRepo(repoRoot)
+      .filter((problem) => problem.code === PROBLEM_CODES.changed)
+      .map((problem) => problem.message)
+
+    expect(changedMessages).toHaveLength(2)
+    expect(changedMessages[0]).toContain('covers 63 lines')
+    expect(changedMessages[1]).not.toContain('covers')
+  })
+
   test('an anchor written as a JSX comment covers the element below it', () => {
     const appLines = [
       'export const App = () => (',

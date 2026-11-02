@@ -566,6 +566,8 @@ type LockSite = {
 
 type LockedSite = { version: number; fingerprint: string; file: string; line: number }
 
+const ENTRY_LOCK_ROLE = 'entry'
+
 const ANCHOR_PATTERN_GLOBAL = new RegExp(ANCHOR_SOURCE, 'g')
 
 // What is left of a line that held only an anchor: the comment markers it sat between.
@@ -717,7 +719,7 @@ const collectLockSites = (
   for (const entry of entriesById.values()) {
     const entryFingerprint = fingerprintLines(entry.text.split('\n'))
     lockSites.push({
-      key: `${entry.id} entry ${entry.file}#1`,
+      key: `${entry.id} ${ENTRY_LOCK_ROLE} ${entry.file}#1`,
       isInLock: true,
       id: entry.id,
       version: entry.version ?? 0,
@@ -735,8 +737,9 @@ const collectLockSites = (
 const idOfLockKey = (key: string): string => key.split(' ')[0] ?? key
 
 // A key is "<id> <role> <file>#<n>", or "<id> entry <file>#1" for an entry.
+const roleOfLockKey = (key: string): string => key.split(' ')[1] ?? ''
 const isRelyingSiteKey = (key: string): boolean => {
-  const role = key.split(' ')[1] ?? ''
+  const role = roleOfLockKey(key)
   return role === ANCHOR_ROLES.uses || role === ANCHOR_ROLES.test
 }
 
@@ -799,6 +802,18 @@ const idAndRoleOfLockKey = (key: string): string => key.split(' ').slice(0, 2).j
  *   4. none                                                      → unacked
  *   a lock line no site claimed                                  → gone
  */
+// Past this many lines an anchor likely covers more than its rule, so an edit beside the rule asks for an
+// ack; said when it does, not as a warning on every check.
+const LONG_BLOCK_LINE_COUNT = 60
+const longBlockHintOf = (lockSite: LockSite): string => {
+  const coveredLineCount = lockSite.lastLine - lockSite.line + 1
+  const isLongAnchoredBlock =
+    roleOfLockKey(lockSite.key) !== ENTRY_LOCK_ROLE && coveredLineCount > LONG_BLOCK_LINE_COUNT
+  return isLongAnchoredBlock
+    ? ` It covers ${coveredLineCount} lines: if the edit is beside the rule, move the anchor to the smaller block that holds it.`
+    : ''
+}
+
 const checkLock = (lockSites: LockSite[], lockedSitesByKey: Map<string, LockedSite>): Problem[] => {
   const problems: Problem[] = []
   const claimedKeys = new Set<string>()
@@ -824,11 +839,11 @@ const checkLock = (lockSites: LockSite[], lockedSitesByKey: Map<string, LockedSi
     const isOwnKeyFree = lockedSitesByKey.has(lockSite.key) && !claimedKeys.has(lockSite.key)
     if (isOwnKeyFree) {
       claimedKeys.add(lockSite.key)
-      const message = `${lockSite.label} changed since the last ack: re-read the entry ${lockSite.id}; it still holds → ack ${lockSite.id}; its meaning changed → bump its version`
+      const message = `${lockSite.label} changed since the last ack: re-read the entry ${lockSite.id}; it still holds → ack ${lockSite.id}; its meaning changed → bump its version.${longBlockHintOf(lockSite)}`
       problems.push(errorAt(PROBLEM_CODES.changed, lockSite, lockSite.id, message))
       continue
     }
-    const message = `${lockSite.label} is not in the lock (new, or moved and edited): verify it, then ack ${lockSite.id}`
+    const message = `${lockSite.label} is not in the lock (new, or moved and edited): verify it, then ack ${lockSite.id}.${longBlockHintOf(lockSite)}`
     problems.push(errorAt(PROBLEM_CODES.unacked, lockSite, lockSite.id, message))
   }
   for (const [key, lockedSite] of lockedSitesByKey) {

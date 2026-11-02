@@ -79,9 +79,9 @@ Files: `scripts/logicmap.ts`, `scripts/logicmap.test.ts`
 Files: `scripts/logicmap.ts`, `scripts/logicmap.test.ts`
 
 ### 4. A long block says so when it asks for an ack
-- [ ] Failing test: the `changed` message of a site over 60 lines names its line count; a short one's
+- [x] Failing test: the `changed` message of a site over 60 lines names its line count; a short one's
   doesn't.
-- [ ] The hint in `checkLock`'s `changed` and `unacked` messages for defining sites.
+- [x] The hint in `checkLock`'s `changed` and `unacked` messages for defining sites.
 Files: `scripts/logicmap.ts`, `scripts/logicmap.test.ts`
 
 ### 5. `untested:` names why no test proves an entry
