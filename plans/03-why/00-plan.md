@@ -83,9 +83,11 @@ Files: `scripts/logicmap.ts`, `scripts/logicmap.test.ts`
 Files: `scripts/logicmap.ts`, `scripts/logicmap.test.ts`
 
 ### 5. A rule's history
-- [ ] Failing test: `why <id>` lists the commits that changed its entry, newest first, each with the pieces that name
+- [x] Failing test: `why <id>` lists the commits that changed its entry, newest first, each with the pieces that name
   the id, beside the entry's `history:` lines.
-- [ ] `-L` over the entry's lines in its ledger file.
+- [x] `-L` over the entry's lines in its ledger file.
+- [x] Failing test (revision 3): a commit that only added or removed blank lines among the lines is left out, counted.
+- [x] The filter.
 Files: `scripts/logicmap.ts`, `scripts/logicmap.test.ts`
 
 ### 6. The Read hook names `why`
@@ -124,3 +126,7 @@ then a commit on `why`; the installed clone gets `main` by `merge --ff-only` onc
    edit above the function makes the rules and the uncommitted note read other lines, and its range runs to the next
    top-level line, taking the next declaration's comment and anchors. Decision 5 finds the declaration in the working
    tree and drops the blank and comment lines at its end; the lines then go through the same mapping as typed lines.
+3. 2026-11-02, step 5, found by the agent on teamabled: `why documents.objection-holds-the-round` listed `8c48378f`,
+   two days older than the rule, because the entry holds a blank line that `git log -L` traced to a blank line that
+   commit added elsewhere. A commit whose change among the traced lines is only blank lines explains nothing; step 5
+   leaves such commits out of the list, for lines and rules alike, and counts them on the first line.

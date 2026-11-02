@@ -1516,12 +1516,14 @@ const listAddedLinesAround = (
 
 // The piece recorded with a commit for these lines, among the pieces of the docs the commit holds: of those
 // holding lines it added around them, one whose Where names the file (a mapping doc quotes code it didn't
-// write) and the most lines; else, of those naming the file, the one whose Where lines are nearest.
+// write) and the most lines; else, of those naming the file, the one whose Where lines are nearest. For a
+// rule's entry, a piece names the rule when its text holds the id: pieces name ids, not ledger files.
 const findRecordedPiece = (
   repoRoot: string,
   commit: LineCommit,
   file: string,
   docPaths: string[],
+  ruleId: string | null,
 ): FoundPiece | null => {
   const fileAtCommit = /^\+\+\+ b\/(.+)$/m.exec(commit.diffText)?.[1] ?? file
   // A doc may name the file from its folder down: `teams/invites.ts` for `src/teams/invites.ts`.
@@ -1563,18 +1565,21 @@ const findRecordedPiece = (
         piece,
         previousPiece: pieces[pieceIndex - 1],
         matchedLineCount: addedLines.filter((addedLine) => piece.text.includes(addedLine)).length,
-        isNamingTheFile: fileNames.some((fileName) => whereText.includes(fileName)),
+        isNamingTheTarget:
+          ruleId === null
+            ? fileNames.some((fileName) => whereText.includes(fileName))
+            : piece.text.includes(ruleId),
         whereLineDistance: Math.min(UNKNOWN_LINE_DISTANCE, ...whereLineDistances),
       }
     })
   })
   // By: holding the code, naming the file, the lines held, the nearest Where; a tie keeps the docs' order.
   const [bestPiece] = scoredPieces
-    .filter((scoredPiece) => scoredPiece.matchedLineCount > 0 || scoredPiece.isNamingTheFile)
+    .filter((scoredPiece) => scoredPiece.matchedLineCount > 0 || scoredPiece.isNamingTheTarget)
     .sort(
       (first, second) =>
         Number(second.matchedLineCount > 0) - Number(first.matchedLineCount > 0) ||
-        Number(second.isNamingTheFile) - Number(first.isNamingTheFile) ||
+        Number(second.isNamingTheTarget) - Number(first.isNamingTheTarget) ||
         second.matchedLineCount - first.matchedLineCount ||
         first.whereLineDistance - second.whereLineDistance,
     )
@@ -1613,12 +1618,10 @@ const findTaskGoal = (
   return null
 }
 
-const describePiece = ({
-  docPath,
-  piece,
-  previousPiece,
-  isFoundByItsCode,
-}: FoundPiece): string[] => {
+const describePiece = (
+  { docPath, piece, previousPiece, isFoundByItsCode }: FoundPiece,
+  namedTarget: string,
+): string[] => {
   const what = readPieceField(piece, 'What')
   const why = readPieceField(piece, 'Why')
   const paragraph = what === '' && why === '' ? readPieceParagraph(piece) : ''
@@ -1629,7 +1632,7 @@ const describePiece = ({
     (isGreenPiece || isReasonShort) && previousPiece !== undefined
       ? readPieceReason(previousPiece)
       : ''
-  const foundByNote = isFoundByItsCode ? '' : '  (names the file; holds none of these lines)'
+  const foundByNote = isFoundByItsCode ? '' : `  (names ${namedTarget}; holds none of these lines)`
   return [
     docPath,
     `${piece.heading}${foundByNote}`,
@@ -1641,7 +1644,12 @@ const describePiece = ({
 }
 
 // Under a commit: the piece recorded with it for these lines, and the goal of its task.
-const describeCommitReason = (repoRoot: string, commit: LineCommit, file: string): string[] => {
+const describeCommitReason = (
+  repoRoot: string,
+  commit: LineCommit,
+  file: string,
+  ruleId: string | null,
+): string[] => {
   const docPaths = runGitOrEmpty(repoRoot, [
     'show',
     '--name-only',
@@ -1654,13 +1662,14 @@ const describeCommitReason = (repoRoot: string, commit: LineCommit, file: string
   if (docPaths.length === 0) {
     return []
   }
-  const foundPiece = findRecordedPiece(repoRoot, commit, file, docPaths)
+  const foundPiece = findRecordedPiece(repoRoot, commit, file, docPaths, ruleId)
   const taskGoal = findTaskGoal(
     repoRoot,
     commit.hash,
     foundPiece === null ? docPaths : [foundPiece.docPath],
   )
-  const pieceLines = foundPiece === null ? [] : describePiece(foundPiece)
+  const namedTarget = ruleId === null ? 'the file' : 'the rule'
+  const pieceLines = foundPiece === null ? [] : describePiece(foundPiece, namedTarget)
   const goalLines = taskGoal === null ? [] : [`Goal (${taskGoal.planPath}): ${taskGoal.goal}`]
   return [...pieceLines, ...goalLines].map((reasonLine) => `  ${reasonLine}`)
 }
@@ -1712,6 +1721,20 @@ const findDeclarationLines = (repoRoot: string, file: string, name: string): Lin
   }
 }
 
+// A commit whose change among the traced lines is only blank lines: git log -L matched a blank line of the range
+// to one the commit added, so it explains nothing about them.
+const isBlankLinesOnlyCommit = (commit: LineCommit): boolean => {
+  const diffLines = commit.diffText.split('\n')
+  const firstHunkIndex = diffLines.findIndex((diffLine) => diffLine.startsWith('@@'))
+  // The lines past the first hunk's header: the file's headers (`--- a/`, `+++ b/`) come before it.
+  const changedLines = diffLines
+    .slice(firstHunkIndex + 1)
+    .filter((diffLine) => diffLine.startsWith('+') || diffLine.startsWith('-'))
+  return (
+    firstHunkIndex !== -1 && changedLines.every((changedLine) => changedLine.slice(1).trim() === '')
+  )
+}
+
 // A first line saying how many commits changed the lines, then each with its reason; a single line when
 // they aren't committed yet.
 const describeLinesHistory = (
@@ -1719,6 +1742,7 @@ const describeLinesHistory = (
   file: string,
   lines: LineRange,
   linesLabel: string,
+  ruleId: string | null,
 ): { summaryLines: string[]; commitLines: string[] } => {
   if (!isFileInHead(repoRoot, file)) {
     return {
@@ -1745,8 +1769,14 @@ const describeLinesHistory = (
     uncommittedLines.length === 0
       ? []
       : [`changed since HEAD, not committed yet: ${describeLineNumbers(uncommittedLines)}`]
-  const shownCommits = commits.slice(0, MAX_COMMITS_SHOWN)
-  const olderCommitCount = commits.length - shownCommits.length
+  const explainingCommits = commits.filter((commit) => !isBlankLinesOnlyCommit(commit))
+  const blankLinesOnlyCount = commits.length - explainingCommits.length
+  const blankLinesOnlyNote =
+    blankLinesOnlyCount === 0
+      ? ''
+      : `; ${blankLinesOnlyCount} more only added or removed blank lines`
+  const shownCommits = explainingCommits.slice(0, MAX_COMMITS_SHOWN)
+  const olderCommitCount = explainingCommits.length - shownCommits.length
   const olderCommitsNote =
     olderCommitCount === 0
       ? []
@@ -1755,14 +1785,14 @@ const describeLinesHistory = (
         ]
   return {
     summaryLines: [
-      `${linesLabel}${headLinesNote}: ${countOf(commits.length, 'commit')}, newest first`,
+      `${linesLabel}${headLinesNote}: ${countOf(explainingCommits.length, 'commit')}, newest first${blankLinesOnlyNote}`,
       ...uncommittedNote,
     ],
     commitLines: [
       ...shownCommits.flatMap((commit, commitIndex) => [
         ...(commitIndex === 0 ? [] : ['']),
         `${commit.date} ${commit.hash} ${commit.subject}`,
-        ...describeCommitReason(repoRoot, commit, file),
+        ...describeCommitReason(repoRoot, commit, file, ruleId),
       ]),
       ...olderCommitsNote,
     ],
@@ -1782,12 +1812,55 @@ const explainLines = (
     ruleLines.length === 0
       ? []
       : ['', 'rules covering these lines (show <id>: one in full):', ...ruleLines]
-  const { summaryLines, commitLines } = describeLinesHistory(repoRoot, file, lines, linesLabel)
+  const { summaryLines, commitLines } = describeLinesHistory(
+    repoRoot,
+    file,
+    lines,
+    linesLabel,
+    null,
+  )
   const commitSection = commitLines.length === 0 ? [] : ['', ...commitLines]
   return [...summaryLines, ...rulesSection, ...commitSection].join('\n')
 }
 
-// Why some lines, or a declaration, are as they are.
+// A rule's entry with its why and its history: lines, then every commit that changed the entry, each with the
+// piece naming the rule.
+const explainRule = (repoRoot: string, entry: LedgerEntry): string => {
+  const entryLines = entry.text.split('\n')
+  const historyIndex = entryLines.findIndex((entryLine) => entryLine.startsWith('history:'))
+  // The history runs from its own line to the next field, as readEntryFields reads a field.
+  const nextFieldOffset = entryLines
+    .slice(historyIndex + 1)
+    .findIndex((entryLine) => ENTRY_FIELD_PATTERN.test(entryLine))
+  const historyEndIndex =
+    nextFieldOffset === -1 ? entryLines.length : historyIndex + 1 + nextFieldOffset
+  const historyLines =
+    historyIndex === -1
+      ? []
+      : entryLines
+          .slice(historyIndex, historyEndIndex)
+          .filter((entryLine) => entryLine.trim() !== '')
+  const ruleLine = `${entry.id}@${entry.version ?? '?'}  ${entry.kind ?? '?'}  ${entry.provenance}  ${entry.claim}`
+  const lines = { firstLine: entry.line, lastLine: entry.line + entryLines.length - 1 }
+  const linesLabel = `${entry.file}:${describeLineRange(lines)} (the entry)`
+  const { summaryLines, commitLines } = describeLinesHistory(
+    repoRoot,
+    entry.file,
+    lines,
+    linesLabel,
+    entry.id,
+  )
+  return [
+    ruleLine,
+    `  why: ${entry.why}`,
+    ...historyLines.map((historyLine) => `  ${historyLine}`),
+    '',
+    ...summaryLines,
+    ...(commitLines.length === 0 ? [] : ['', ...commitLines]),
+  ].join('\n')
+}
+
+// Why some lines, a declaration or a rule are as they are.
 export const whyLogicMap = (repoRoot: string, target: string): string => {
   const [, fileOfLines, firstLineText, lastLineText] = FILE_LINES_TARGET_PATTERN.exec(target) ?? []
   if (fileOfLines !== undefined) {
@@ -1807,7 +1880,10 @@ export const whyLogicMap = (repoRoot: string, target: string): string => {
     const declarationLabel = `${fileOfName}:${declarationName} (${describeLineRange(declarationLines)})`
     return explainLines(repoRoot, fileOfName, declarationLines, declarationLabel)
   }
-  return `why takes <file>:<line>[-<line>] or <file>:<name>, not "${target}"`
+  const entry = createShowViews(repoRoot).analysis.entriesById.get(target)
+  return entry === undefined
+    ? `${target} is neither a rule of ${LEDGER_DIRECTORY}/ nor <file>:<line>[-<line>] or <file>:<name>`
+    : explainRule(repoRoot, entry)
 }
 
 // ---------- Command line ----------

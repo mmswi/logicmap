@@ -1314,6 +1314,102 @@ describe('why', () => {
       'no line at the top level of src/room.ts names enterRoom',
     )
   })
+
+  test("a rule's why: its entry, its history, then each commit of its entry with the piece naming it", () => {
+    const syncLedgerLines = [
+      '# sync',
+      'The rooms.',
+      '',
+      '## sync.close-during-join',
+      'kind: edge',
+      'version: 1',
+      'what: The socket can close while the join is loading.',
+      'why: The join adds the connection before it resolves.',
+      'source: fixture',
+      'history:',
+      '- @1: introduced',
+      '',
+    ]
+    const repoRoot = createFixtureRepo({
+      'logicmap/sync.md': syncLedgerLines.join('\n'),
+      'plans/01-the-join/01-the-edge.md': [
+        '## Piece 1: the edge mapped',
+        'What: `sync.close-during-join`, the entry and its anchor.',
+        'Why: a socket closed during the join stayed in the room.',
+        '',
+      ].join('\n'),
+    })
+    commitFixtureRepo(repoRoot, 'wip: the join mapped')
+    syncLedgerLines.splice(5, 1, 'version: 2')
+    syncLedgerLines.splice(11, 0, '- @2: the join removes a socket closed meanwhile')
+    writeFixtureFiles(repoRoot, {
+      'logicmap/sync.md': syncLedgerLines.join('\n'),
+      'plans/02-other/01-other.md': [
+        '## Piece 1: another change',
+        'What: nothing about the join.',
+        '',
+      ].join('\n'),
+      'plans/03-the-removal/01-the-removal.md': [
+        '## Piece 1: the join removes a socket closed meanwhile',
+        'What: `sync.close-during-join` bumped to @2.',
+        'Why: the room kept a socket the join had already lost.',
+        '',
+      ].join('\n'),
+    })
+    commitFixtureRepo(repoRoot, 'wip: the removal')
+
+    const ruleWhy = whyLogicMap(repoRoot, 'sync.close-during-join')
+    expect(ruleWhy).toStartWith(
+      [
+        'sync.close-during-join@2  edge  recorded  The socket can close while the join is loading.',
+        '  why: The join adds the connection before it resolves.',
+        '  history:',
+        '  - @1: introduced',
+        '  - @2: the join removes a socket closed meanwhile',
+        '',
+        'logicmap/sync.md:4-12 (the entry): 2 commits, newest first',
+      ].join('\n'),
+    )
+    expect(ruleWhy).toContain(
+      [
+        'wip: the removal',
+        '  plans/03-the-removal/01-the-removal.md',
+        '  ## Piece 1: the join removes a socket closed meanwhile  (names the rule; holds none of these lines)',
+      ].join('\n'),
+    )
+    expect(ruleWhy).toContain(
+      [
+        'wip: the join mapped',
+        '  plans/01-the-join/01-the-edge.md',
+        '  ## Piece 1: the edge mapped',
+      ].join('\n'),
+    )
+    expect(whyLogicMap(repoRoot, 'sync.nope')).toBe(
+      'sync.nope is neither a rule of logicmap/ nor <file>:<line>[-<line>] or <file>:<name>',
+    )
+  })
+
+  test('a commit that only added or removed blank lines among the lines is left out, and counted', () => {
+    const roomLines = [
+      'export const joinRoom = () => {',
+      '  const size = room.size',
+      '  return size',
+      '}',
+      '',
+    ]
+    const repoRoot = createFixtureRepo({ 'src/room.ts': roomLines.join('\n') })
+    commitFixtureRepo(repoRoot, 'wip: the room')
+    roomLines.splice(2, 0, '')
+    writeFixtureFiles(repoRoot, { 'src/room.ts': roomLines.join('\n') })
+    commitFixtureRepo(repoRoot, 'wip: a blank line')
+
+    const joinWhy = whyLogicMap(repoRoot, 'src/room.ts:joinRoom')
+    expect(joinWhy).toStartWith(
+      'src/room.ts:joinRoom (1-5): 1 commit, newest first; 1 more only added or removed blank lines',
+    )
+    expect(joinWhy).toContain('wip: the room')
+    expect(joinWhy).not.toContain('wip: a blank line')
+  })
 })
 
 describe('hook', () => {
