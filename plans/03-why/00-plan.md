@@ -102,7 +102,8 @@ Files: `scripts/hook.ts`, `scripts/logicmap.test.ts`
 - [x] `USAGE`; SKILL.md: the command list, "Reading anchored code" (no anchor → `why`), "Why a line was written" made
   `why` (a squash merge keeps one commit and its docs; teamabled merges keep each commit), the AGENTS.md snippet;
   README.
-- [ ] Teamabled's `CLAUDE.md` and `AGENTS.md` name `why` (a teamabled commit of its own).
+- [x] Teamabled's `CLAUDE.md` and `AGENTS.md` name `why` (a teamabled commit of its own, `9853b368` on
+  `feat/shared-mirrors`).
 Files: `scripts/logicmap.ts`, `SKILL.md`, `README.md`
 
 ### 8. Acceptance
@@ -117,7 +118,7 @@ then a commit on `why`; the installed clone gets `main` by `merge --ff-only` onc
 ## Results
 
 - `why <file>:<line>[-<line>]`, `why <file>:<name>`, `why <id>`; the Read hook's line; 41 tests (32 before), strict
-  tsc and biome clean. Commits on `why`: `844932d` (step 1) to `9c293ae` (step 7) and step 8's.
+  tsc and biome clean. Commits on `why`: `844932d` (step 1) to `484fe4b` (step 8), fast-forwarded into the installed clone's main.
 - Acceptance (`acceptance.md`): both fresh agents answered the ten right; with `why` in 21 tool calls, without in 41,
   and question 6's history whole (5 of 5 pieces, 3 of 5 without); 273 s against 469 s.
 - Cost: `why` on a line 0.2–0.7 s; on the 9 lines of `DocumentEditorPage.tsx` with 10 commits 1.3 s; the Read hook
