@@ -546,10 +546,13 @@ const checkEntryAgainstAnchors = (entry: LedgerEntry, entryAnchors: Anchor[]): P
 
 // ---------- Lock: each site's fingerprint as it was at its last ack ----------
 
-// A place an agent verifies: the code under an anchor, or an entry's text. The key names the place,
-// the version and fingerprint record what was verified there.
+// The code under an anchor, or an entry's text. The key names the place, the version and fingerprint
+// record what was verified there. Only a defining anchor's code and an entry are in the lock: a uses or
+// test site claims only that it relies on the rule, and its pin says when the rule changed (stale-pin).
+// Every site keeps its covered lines, which show and the hook print.
 type LockSite = {
   key: string
+  isInLock: boolean
   id: string
   version: number
   fingerprint: string
@@ -671,6 +674,7 @@ const collectLockSites = (
         : fileLines.slice(anchoredLineRange.headLineIndex, anchoredLineRange.lastLineIndex + 1)
     lockSites.push({
       key: `${place}#${occurrence}`,
+      isInLock: isDefiningRole(anchor.role),
       id: anchor.id,
       version: anchor.version,
       fingerprint: fingerprintLines(anchoredLines),
@@ -683,6 +687,7 @@ const collectLockSites = (
   for (const entry of entriesById.values()) {
     lockSites.push({
       key: `${entry.id} entry ${entry.file}#1`,
+      isInLock: true,
       id: entry.id,
       version: entry.version ?? 0,
       fingerprint: fingerprintLines(entry.text.split('\n')),
@@ -696,6 +701,12 @@ const collectLockSites = (
 }
 
 const idOfLockKey = (key: string): string => key.split(' ')[0] ?? key
+
+// A key is "<id> <role> <file>#<n>", or "<id> entry <file>#1" for an entry.
+const isRelyingSiteKey = (key: string): boolean => {
+  const role = key.split(' ')[1] ?? ''
+  return role === ANCHOR_ROLES.uses || role === ANCHOR_ROLES.test
+}
 
 // One lock per domain, beside its ledger file (logicmap/sync.lock next to logicmap/sync.md), so an
 // ack rewrites only the lock of the domain it touched.
@@ -724,7 +735,12 @@ const readLock = (repoRoot: string): Map<string, LockedSite> => {
       const fingerprint = lockLineParts.pop() ?? ''
       const version = Number(lockLineParts.pop())
       const line = lineIndex + 1
-      lockedSitesByKey.set(lockLineParts.join(' '), { version, fingerprint, file: lockFile, line })
+      const key = lockLineParts.join(' ')
+      // Written before uses and test sites left the lock; the next ack of its domain drops it.
+      if (isRelyingSiteKey(key)) {
+        continue
+      }
+      lockedSitesByKey.set(key, { version, fingerprint, file: lockFile, line })
     }
   }
   return lockedSitesByKey
@@ -732,7 +748,8 @@ const readLock = (repoRoot: string): Map<string, LockedSite> => {
 
 const checkLock = (lockSites: LockSite[], lockedSitesByKey: Map<string, LockedSite>): Problem[] => {
   const problems: Problem[] = []
-  for (const lockSite of lockSites) {
+  const sitesInLock = lockSites.filter((lockSite) => lockSite.isInLock)
+  for (const lockSite of sitesInLock) {
     const lockedSite = lockedSitesByKey.get(lockSite.key)
     if (lockedSite === undefined) {
       const message = `${lockSite.label} is not in the lock (new, or moved): verify it, then ack ${lockSite.id}`
@@ -746,7 +763,7 @@ const checkLock = (lockSites: LockSite[], lockedSitesByKey: Map<string, LockedSi
       problems.push(errorAt(PROBLEM_CODES.changed, lockSite, lockSite.id, message))
     }
   }
-  const currentKeys = new Set(lockSites.map((lockSite) => lockSite.key))
+  const currentKeys = new Set(sitesInLock.map((lockSite) => lockSite.key))
   for (const [key, lockedSite] of lockedSitesByKey) {
     if (!currentKeys.has(key)) {
       const id = idOfLockKey(key)
@@ -841,7 +858,7 @@ export const ackIds = (
     .filter(([key]) => !requestedIds.has(idOfLockKey(key)))
     .map(([key, lockedSite]) => `${key} ${lockedSite.version} ${lockedSite.fingerprint}`)
   const ackedLockLines = lockSites
-    .filter((lockSite) => requestedIds.has(lockSite.id))
+    .filter((lockSite) => lockSite.isInLock && requestedIds.has(lockSite.id))
     .map((lockSite) => `${lockSite.key} ${lockSite.version} ${lockSite.fingerprint}`)
   const lockLines = [...keptLockLines, ...ackedLockLines].sort()
   // A lock line starts with its key, and a key with its id.

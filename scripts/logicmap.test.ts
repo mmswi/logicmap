@@ -413,7 +413,45 @@ describe('lock', () => {
 
     roomLines.splice(2, 0, '  // §uses sync.pooled-buffer-slice@1')
     writeFixtureFiles(repoRoot, { 'src/room.ts': roomLines.join('\n') })
-    expect(describeLockProblems(repoRoot)).toEqual(['unacked src/room.ts:3'])
+    expect(describeLockProblems(repoRoot)).toEqual([])
+  })
+
+  test('a uses or test site is not in the lock: adding or editing one asks no ack, its pin still follows the entry', () => {
+    const repoRoot = createFixtureRepo({
+      'src/room.ts': ['// §edge sync.close-during-join@1', 'const undoJoin = () => {}', ''].join(
+        '\n',
+      ),
+      'logicmap/sync.md': closeDuringJoinEntry(1),
+    })
+    ackIds(repoRoot, ['sync.close-during-join'])
+    const writeRelyingSites = (callerLine: string, version: number): void =>
+      writeFixtureFiles(repoRoot, {
+        'src/caller.ts': [`// §uses sync.close-during-join@${version}`, callerLine, ''].join('\n'),
+        'src/room.test.ts': [
+          `// §test sync.close-during-join@${version}`,
+          "test('undoes the join', () => {})",
+          '',
+        ].join('\n'),
+      })
+
+    writeRelyingSites('joinSocket()', 1)
+    expect(describeLockProblems(repoRoot)).toEqual([])
+
+    writeRelyingSites('joinSocketAgain()', 1)
+    expect(describeLockProblems(repoRoot)).toEqual([])
+
+    const lockText = readFixtureFile(repoRoot, 'logicmap/sync.lock')
+    writeFixtureFiles(repoRoot, {
+      'logicmap/sync.lock': `${lockText}sync.close-during-join uses src/old.ts#1 1 0123456789ab\n`,
+    })
+    expect(describeLockProblems(repoRoot)).toEqual([])
+
+    writeFixtureFiles(repoRoot, { 'logicmap/sync.md': closeDuringJoinEntry(2) })
+    expect(describeErrors(repoRoot)).toEqual([
+      'stale-pin src/caller.ts:1',
+      'stale-pin src/room.test.ts:1',
+      'stale-pin src/room.ts:1',
+    ])
   })
 
   test('an anchor written as a JSX comment covers the element below it', () => {
