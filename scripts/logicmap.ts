@@ -1047,13 +1047,8 @@ const createShowViews = (repoRoot: string) => {
   const describeSite = (anchor: Anchor): string =>
     `${anchor.file}:${describeLineRange(coveredLinesOf(anchor))}  ${describeAnchor(anchor)}  ${siteStatusOf(anchor)}`
 
-  // Each rule once, in the order its first site appears, with every site in the requested lines under it.
-  const listFileRuleSections = (file: string, requestedLines: LineRange | null): RuleSection[] => {
-    const fileAnchors = analysis.anchors.filter((anchor) => anchor.file === file)
-    const shownAnchors =
-      requestedLines === null
-        ? fileAnchors
-        : fileAnchors.filter((anchor) => doLineRangesMeet(coveredLinesOf(anchor), requestedLines))
+  // Each rule once, in the order its first site appears, with each of these sites under it.
+  const describeRuleSections = (shownAnchors: Anchor[]): RuleSection[] => {
     const anchorsById = Map.groupBy(shownAnchors, (anchor) => anchor.id)
     return [...anchorsById].map(([id, ruleAnchors]) => {
       const entry = analysis.entriesById.get(id)
@@ -1068,6 +1063,24 @@ const createShowViews = (repoRoot: string) => {
       return { id, version: entry?.version ?? null, text: [ruleLine, ...siteLines].join('\n') }
     })
   }
+  const listFileRuleSections = (file: string, requestedLines: LineRange | null): RuleSection[] => {
+    const fileAnchors = analysis.anchors.filter((anchor) => anchor.file === file)
+    return describeRuleSections(
+      requestedLines === null
+        ? fileAnchors
+        : fileAnchors.filter((anchor) => doLineRangesMeet(coveredLinesOf(anchor), requestedLines)),
+    )
+  }
+  // The rules whose uses or test sites in this file cover some of these lines: the sites no lock fingerprints.
+  const listReferringRuleSections = (file: string, changedLines: LineRange[]): RuleSection[] =>
+    describeRuleSections(
+      analysis.anchors.filter(
+        (anchor) =>
+          anchor.file === file &&
+          !isDefiningRole(anchor.role) &&
+          changedLines.some((lines) => doLineRangesMeet(coveredLinesOf(anchor), lines)),
+      ),
+    )
   const showFileRules = (file: string, requestedLines: LineRange | null): string =>
     listFileRuleSections(file, requestedLines)
       .map((ruleSection) => ruleSection.text)
@@ -1152,6 +1165,7 @@ const createShowViews = (repoRoot: string) => {
     showOneId,
     showFileRules,
     listFileRuleSections,
+    listReferringRuleSections,
     isAnchoredFile,
     isKnownId,
     describeUnanchoredFile,
@@ -1200,6 +1214,13 @@ export const listRuleSectionsInLines = (
   const views = createShowViews(repoRoot)
   return views.isAnchoredFile(file) ? views.listFileRuleSections(file, lines) : []
 }
+
+// The rules whose uses or test sites in a file cover some of these lines: what the hook adds after an edit.
+export const listReferringRuleSectionsInLines = (
+  repoRoot: string,
+  file: string,
+  changedLines: LineRange[],
+): RuleSection[] => createShowViews(repoRoot).listReferringRuleSections(file, changedLines)
 
 // ---------- Diff: what changed under a rule's sites since their last ack ----------
 

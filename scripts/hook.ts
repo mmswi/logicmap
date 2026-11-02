@@ -12,6 +12,7 @@ import {
   checkRepo,
   findNewestLinesChange,
   formatProblem,
+  listReferringRuleSectionsInLines,
   listRuleSectionsInLines,
 } from './logicmap.ts'
 
@@ -81,6 +82,8 @@ const editedReposFileOf = (sessionId: string): string => sessionFileOf(sessionId
 const shownRulesFileOf = (sessionId: string): string => sessionFileOf(sessionId, '.shown-rules.txt')
 const namedChangesFileOf = (sessionId: string): string =>
   sessionFileOf(sessionId, '.named-changes.txt')
+const reliedOnRulesFileOf = (sessionId: string): string =>
+  sessionFileOf(sessionId, '.relied-on-rules.txt')
 
 const appendToSessionFile = (sessionFile: string, lines: string[]): void => {
   mkdirSync(SESSION_FILES_DIRECTORY, { recursive: true })
@@ -125,12 +128,10 @@ const toReadLines = (offset: unknown, limit: unknown): LineRange | null => {
 const shownRuleLineOf = (repoRoot: string, ruleSection: RuleSection): string =>
   `${repoRoot} ${ruleSection.id}@${ruleSection.version ?? '?'}`
 
-const readShownRuleLines = (sessionId: string): Set<string> => {
-  const shownRulesFile = shownRulesFileOf(sessionId)
-  return existsSync(shownRulesFile)
-    ? new Set(readFileSync(shownRulesFile, 'utf8').split('\n').filter(Boolean))
+const readSessionFileLines = (sessionFile: string): Set<string> =>
+  existsSync(sessionFile)
+    ? new Set(readFileSync(sessionFile, 'utf8').split('\n').filter(Boolean))
     : new Set()
-}
 
 // A commit subject is cut here: teamabled's run to 300 characters.
 const NAMED_SUBJECT_MAX_LENGTH = 100
@@ -164,9 +165,7 @@ const listNewestChangeLines = (
   const namedChangeLine = `${repoRoot} ${file}`
   const namedChangesFile = sessionId === null ? null : namedChangesFileOf(sessionId)
   const isNamedBefore =
-    namedChangesFile !== null &&
-    existsSync(namedChangesFile) &&
-    readFileSync(namedChangesFile, 'utf8').split('\n').includes(namedChangeLine)
+    namedChangesFile !== null && readSessionFileLines(namedChangesFile).has(namedChangeLine)
   if (!isCodeFile || isNamedBefore) {
     return []
   }
@@ -206,7 +205,8 @@ const respondToRead = (
   if (ruleSections.length === 0 && newestChangeLines.length === 0) {
     return null
   }
-  const shownRuleLines = sessionId === null ? new Set<string>() : readShownRuleLines(sessionId)
+  const shownRuleLines =
+    sessionId === null ? new Set<string>() : readSessionFileLines(shownRulesFileOf(sessionId))
   const isShownBefore = (ruleSection: RuleSection): boolean =>
     shownRuleLines.has(shownRuleLineOf(repoRoot, ruleSection))
   const newRuleSections = ruleSections.filter((ruleSection) => !isShownBefore(ruleSection))
@@ -239,6 +239,70 @@ const respondToRead = (
 const isProblemOfFile = (problem: Problem, file: string): boolean =>
   problem.file === file || problem.message.includes(` ${file}#`)
 
+// A hunk header of git diff -U0: where its lines start in the file as it is now, and how many (1 when unsaid).
+const DIFF_HUNK_HEADER_PATTERN = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@/
+
+// The lines of the file that differ from HEAD; a removal is the line before it. Nothing for a file HEAD lacks.
+const listChangedLineRanges = (repoRoot: string, file: string): LineRange[] =>
+  execFileSync('git', ['diff', '-U0', '--no-color', '--no-ext-diff', 'HEAD', '--', file], {
+    cwd: repoRoot,
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'ignore'],
+  })
+    .split('\n')
+    .flatMap((diffLine) => {
+      const [, firstLineText, lineCountText = '1'] = DIFF_HUNK_HEADER_PATTERN.exec(diffLine) ?? []
+      if (firstLineText === undefined) {
+        return []
+      }
+      const firstLine = Math.max(Number(firstLineText), 1)
+      return [{ firstLine, lastLine: firstLine + Math.max(Number(lineCountText), 1) - 1 }]
+    })
+
+const reliedOnRuleLineOf = (repoRoot: string, file: string, ruleSection: RuleSection): string =>
+  `${repoRoot} ${file} ${ruleSection.id}@${ruleSection.version ?? '?'}`
+
+// The rules whose uses or test sites cover lines changed since HEAD, which no lock fingerprints: each once per
+// file and session, and none the file's errors already name. A failing git call costs this note only.
+const listReliedOnRuleLines = (
+  repoRoot: string,
+  file: string,
+  fileErrors: Problem[],
+  sessionId: string | null,
+): string[] => {
+  try {
+    const reliedOnRulesFile = sessionId === null ? null : reliedOnRulesFileOf(sessionId)
+    const namedRuleLines =
+      reliedOnRulesFile === null ? new Set<string>() : readSessionFileLines(reliedOnRulesFile)
+    const erroredIds = new Set(fileErrors.map((problem) => problem.id))
+    const changedLines = listChangedLineRanges(repoRoot, file)
+    const newRuleSections = (
+      changedLines.length === 0
+        ? []
+        : listReferringRuleSectionsInLines(repoRoot, file, changedLines)
+    ).filter(
+      (ruleSection) =>
+        !erroredIds.has(ruleSection.id) &&
+        !namedRuleLines.has(reliedOnRuleLineOf(repoRoot, file, ruleSection)),
+    )
+    if (newRuleSections.length === 0) {
+      return []
+    }
+    if (reliedOnRulesFile !== null) {
+      appendToSessionFile(
+        reliedOnRulesFile,
+        newRuleSections.map((ruleSection) => reliedOnRuleLineOf(repoRoot, file, ruleSection)),
+      )
+    }
+    return [
+      `logicmap: the edit to ${file} changed lines under these rules' uses or test sites, which check doesn't fingerprint. Read each rule against the new code (logicmap show <id>): the code under a §uses site must still rely on what the rule says, and a §test must still fail when the rule breaks.`,
+      ...newRuleSections.map((ruleSection) => ruleSection.text),
+    ]
+  } catch {
+    return []
+  }
+}
+
 const respondToEdit = (filePath: string, sessionId: string | null): HookOutput | null => {
   const repoRoot = findMappedRepoRoot(dirname(filePath))
   if (repoRoot === null) {
@@ -251,15 +315,18 @@ const respondToEdit = (filePath: string, sessionId: string | null): HookOutput |
   const fileErrors = checkRepo(repoRoot).filter(
     (problem) => problem.severity === PROBLEM_SEVERITIES.error && isProblemOfFile(problem, file),
   )
-  if (fileErrors.length === 0) {
+  const reliedOnRuleLines = listReliedOnRuleLines(repoRoot, file, fileErrors, sessionId)
+  if (fileErrors.length === 0 && reliedOnRuleLines.length === 0) {
     return null
   }
-  return addContext(
-    [
-      `logicmap: the edit to ${file} left the map out of step with the code. Re-read each entry (logicmap show <id>), then ack it if it still holds, or bump its version if its meaning changed:`,
-      ...fileErrors.map(formatProblem),
-    ].join('\n'),
-  )
+  const errorLines =
+    fileErrors.length === 0
+      ? []
+      : [
+          `logicmap: the edit to ${file} left the map out of step with the code. Re-read each entry (logicmap show <id>), then ack it if it still holds, or bump its version if its meaning changed:`,
+          ...fileErrors.map(formatProblem),
+        ]
+  return addContext([...errorLines, ...reliedOnRuleLines].join('\n'))
 }
 
 // Without a session id (an older Claude Code), every stop in a mapped repo is asked.

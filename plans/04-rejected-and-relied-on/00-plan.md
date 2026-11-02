@@ -30,14 +30,15 @@ Two gaps the work on `why` left, each measured:
 Files: `scripts/logicmap.ts`, `scripts/logicmap.test.ts`
 
 ### 2. An edit under a `uses` or `test` site names its rule
-- [ ] Red: an edit inside a `§uses` site's lines gets one note naming the rule (its claim) and the site; inside a
+- [x] Red: an edit inside a `§uses` site's lines gets one note naming the rule (its claim) and the site; inside a
   `§test` site, the note says the test must still fail when the rule breaks; an edit under no site, or only under a
   defining site (`check` reports that one), gets none; the same rule edited again in the session isn't named again;
   a file git doesn't hold gets none.
-- [ ] Green, `logicmap.ts`: the rule sections of a file's referring sites that meet some line ranges, built by the
+- [x] Green, `logicmap.ts`: the rule sections of a file's referring sites that meet some line ranges, built by the
   same code as `show <file>`'s.
-- [ ] Green, `hook.ts`: the changed lines from `git diff -U0 HEAD -- <file>`; `respondToEdit` adds the note after the
-  file's errors, once per rule version and session; a failing git call costs the note only.
+- [x] Green, `hook.ts`: the changed lines from `git diff -U0 HEAD -- <file>`; `respondToEdit` adds the note after the
+  file's errors, once per file, rule version and session, and not for a rule the errors already name; a failing
+  git call costs the note only.
 Files: `scripts/logicmap.ts`, `scripts/hook.ts`, `scripts/logicmap.test.ts`
 
 ### 3. The docs

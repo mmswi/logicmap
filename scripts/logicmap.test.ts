@@ -1624,6 +1624,77 @@ describe('hook', () => {
     expect(JSON.stringify(editOutput)).toContain('src/room.ts:2: error changed')
   })
 
+  test('after an edit under a uses or test site, its rule, once per file and session; nothing where check speaks', () => {
+    const repoRoot = createMappedRepo()
+    writeFixtureFiles(repoRoot, {
+      'src/caller.ts': [
+        'export const leave = () => {',
+        '  // §uses sync.close-during-join@1',
+        '  closeSocket()',
+        '  log()',
+        '}',
+        '',
+      ].join('\n'),
+      'src/room.test.ts': [
+        '// §test sync.close-during-join@1',
+        "test('a socket closed meanwhile is removed', () => {",
+        '  expect(rooms.size).toBe(0)',
+        '})',
+        '',
+      ].join('\n'),
+    })
+    commitFixtureRepo(repoRoot, 'wip: the join')
+    const sessionId = `editing-${crypto.randomUUID()}`
+    const contextOfEdit = (editingSessionId: string, file: string, from: string, to: string) => {
+      writeFixtureFiles(repoRoot, { [file]: readFixtureFile(repoRoot, file).replace(from, to) })
+      const hookOutput = respondToHook({
+        hook_event_name: 'PostToolUse',
+        session_id: editingSessionId,
+        tool_name: 'Edit',
+        tool_input: { file_path: join(repoRoot, file) },
+      })
+      return hookOutput !== null && 'hookSpecificOutput' in hookOutput
+        ? hookOutput.hookSpecificOutput.additionalContext
+        : null
+    }
+    const ruleLine =
+      'sync.close-during-join@1  edge  recorded  The socket can close while the join is loading.'
+
+    expect(
+      contextOfEdit(`another-${crypto.randomUUID()}`, 'src/caller.ts', 'log()', 'log(1)'),
+    ).toBeNull()
+    const callerEdit = contextOfEdit(
+      sessionId,
+      'src/caller.ts',
+      'closeSocket()',
+      'closeSocket(true)',
+    )
+    expect(callerEdit).toStartWith(
+      "logicmap: the edit to src/caller.ts changed lines under these rules' uses or test sites, which check doesn't fingerprint.",
+    )
+    expect(callerEdit).toEndWith(`\n${ruleLine}\n  2-3  §uses  ok`)
+    expect(
+      contextOfEdit(sessionId, 'src/caller.ts', 'closeSocket(true)', 'closeSocket(false)'),
+    ).toBeNull()
+    expect(contextOfEdit(sessionId, 'src/room.test.ts', 'toBe(0)', 'toBe(1)')).toEndWith(
+      `\n${ruleLine}\n  1-4  §test  ok`,
+    )
+
+    const definingEdit = contextOfEdit(
+      sessionId,
+      'src/room.ts',
+      'removeConnection',
+      'dropConnection',
+    )
+    expect(definingEdit).toContain('src/room.ts:2: error changed')
+    expect(definingEdit).not.toContain('uses or test sites')
+
+    writeFixtureFiles(repoRoot, {
+      'src/new.ts': '// §uses sync.close-during-join@1\nexport const fresh = () => close()\n',
+    })
+    expect(contextOfEdit(sessionId, 'src/new.ts', 'close()', 'close(true)')).toBeNull()
+  })
+
   test('at stop, the errors of check, once, for a session that edited the repo; nothing outside one', () => {
     const repoRoot = createMappedRepo()
     const roomPath = join(repoRoot, 'src/room.ts')
