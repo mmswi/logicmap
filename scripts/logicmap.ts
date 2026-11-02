@@ -1222,19 +1222,42 @@ const findAckCommit = (repoRoot: string, lockFile: string, lockLine: string): st
 }
 
 const HUNK_START_PATTERN = /^(?=@@ )/m
-const HUNK_NEW_LINES_PATTERN = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@/
+const HUNK_HEADER_PATTERN = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/
+
+// Where a hunk sits: its first line and its line count in the old file and in the new one.
+type DiffHunk = {
+  oldFirstLine: number
+  oldLineCount: number
+  newFirstLine: number
+  newLineCount: number
+}
+
+const parseDiffHunk = (hunkText: string): DiffHunk | null => {
+  const [, oldFirstText, oldCountText = '1', newFirstText, newCountText = '1'] =
+    HUNK_HEADER_PATTERN.exec(hunkText) ?? []
+  if (oldFirstText === undefined || newFirstText === undefined) {
+    return null
+  }
+  return {
+    oldFirstLine: Number(oldFirstText),
+    oldLineCount: Number(oldCountText),
+    newFirstLine: Number(newFirstText),
+    newLineCount: Number(newCountText),
+  }
+}
+
+// The last line of the new file a hunk holds; a hunk that only removes lines (+N,0) sits after line N.
+const lastNewLineOf = (hunk: DiffHunk): number =>
+  hunk.newFirstLine + Math.max(hunk.newLineCount, 1) - 1
 
 // The hunks of a file's diff whose lines in the file as it is now meet these lines.
 const hunksMeetingLines = (diffText: string, lines: LineRange): string[] =>
-  diffText.split(HUNK_START_PATTERN).filter((hunk) => {
-    const [, firstLineText, lineCountText = '1'] = HUNK_NEW_LINES_PATTERN.exec(hunk) ?? []
-    if (firstLineText === undefined) {
-      return false
-    }
-    const firstLine = Number(firstLineText)
-    // A hunk that only removes lines (+N,0) sits after line N.
-    const lastLine = firstLine + Math.max(Number(lineCountText), 1) - 1
-    return doLineRangesMeet({ firstLine, lastLine }, lines)
+  diffText.split(HUNK_START_PATTERN).filter((hunkText) => {
+    const hunk = parseDiffHunk(hunkText)
+    return (
+      hunk !== null &&
+      doLineRangesMeet({ firstLine: hunk.newFirstLine, lastLine: lastNewLineOf(hunk) }, lines)
+    )
   })
 
 // For each site of the id whose code or entry differs from its lock line, the git diff of its file from
@@ -1268,6 +1291,149 @@ export const diffLogicMap = (repoRoot: string, id: string): string => {
     : changedSiteSections.join('\n\n')
 }
 
+// ---------- Why: the commits that changed some lines, and the reasons recorded with them ----------
+
+const MAX_COMMITS_SHOWN = 10
+// Opens each commit in git log's output (format %x1e): no line of a diff starts with it.
+const COMMIT_SEPARATOR = '\x1e'
+
+type LineCommit = { hash: string; date: string; subject: string; diffText: string }
+
+type HeadLinesOfWorkingLines = { headLines: LineRange | null; uncommittedLines: number[] }
+
+const isFileInHead = (repoRoot: string, file: string): boolean => {
+  try {
+    runGit(repoRoot, ['cat-file', '-e', `HEAD:${file}`])
+    return true
+  } catch {
+    return false
+  }
+}
+
+const listLineNumbers = ({ firstLine, lastLine }: LineRange): number[] =>
+  Array.from({ length: Math.max(lastLine - firstLine + 1, 0) }, (_, offset) => firstLine + offset)
+
+// 3, 4, 5, 9 → "3-5, 9"
+const describeLineNumbers = (lineNumbers: number[]): string =>
+  lineNumbers
+    .reduce<LineRange[]>((ranges, line) => {
+      const lastRange = ranges.at(-1)
+      if (lastRange !== undefined && lastRange.lastLine === line - 1) {
+        lastRange.lastLine = line
+      } else {
+        ranges.push({ firstLine: line, lastLine: line })
+      }
+      return ranges
+    }, [])
+    .map(describeLineRange)
+    .join(', ')
+
+// The working tree's lines as HEAD numbers them: git log -L reads HEAD, an agent reads the file as it is now.
+// A line changed since HEAD stands for the lines it replaced; a line added since HEAD for none.
+const toHeadLines = (repoRoot: string, file: string, lines: LineRange): HeadLinesOfWorkingLines => {
+  const hunksSinceHead = runGit(repoRoot, ['diff', '-U0', 'HEAD', '--', file])
+    .split(HUNK_START_PATTERN)
+    .flatMap((hunkText) => parseDiffHunk(hunkText) ?? [])
+  const findHunkHoldingLine = (line: number): DiffHunk | undefined =>
+    hunksSinceHead.find(
+      (hunk) => hunk.newLineCount > 0 && hunk.newFirstLine <= line && line <= lastNewLineOf(hunk),
+    )
+  const workingLines = listLineNumbers(lines)
+  const headLineNumbers = workingLines.flatMap((line) => {
+    const hunkHoldingLine = findHunkHoldingLine(line)
+    if (hunkHoldingLine !== undefined) {
+      return listLineNumbers({
+        firstLine: hunkHoldingLine.oldFirstLine,
+        lastLine: hunkHoldingLine.oldFirstLine + hunkHoldingLine.oldLineCount - 1,
+      })
+    }
+    // Every hunk above the line moves it by the lines it removed less the lines it added.
+    const lineShift = hunksSinceHead
+      .filter((hunk) => lastNewLineOf(hunk) < line)
+      .reduce((shift, hunk) => shift + hunk.oldLineCount - hunk.newLineCount, 0)
+    return [line + lineShift]
+  })
+  const headLines =
+    headLineNumbers.length === 0
+      ? null
+      : { firstLine: Math.min(...headLineNumbers), lastLine: Math.max(...headLineNumbers) }
+  const uncommittedLines = workingLines.filter((line) => findHunkHoldingLine(line) !== undefined)
+  return { headLines, uncommittedLines }
+}
+
+// Every commit that changed these lines of HEAD, newest first, with the diff git log -L shows for them;
+// null when git can't trace them (lines past the end of the file).
+const listLineCommitsOrNull = (
+  repoRoot: string,
+  file: string,
+  headLines: LineRange,
+): LineCommit[] | null => {
+  try {
+    return runGit(repoRoot, [
+      'log',
+      `-L${headLines.firstLine},${headLines.lastLine}:${file}`,
+      '--format=%x1e%h %ad %s',
+      '--date=short',
+    ])
+      .split(COMMIT_SEPARATOR)
+      .slice(1)
+      .map((commitText) => {
+        const [headerLine = '', ...diffLines] = commitText.split('\n')
+        const [, hash = '', date = '', subject = ''] = /^(\S+) (\S+) (.*)$/.exec(headerLine) ?? []
+        return { hash, date, subject, diffText: diffLines.join('\n') }
+      })
+  } catch {
+    return null
+  }
+}
+
+// Why these lines are as they are: every commit that changed them, newest first.
+export const whyLogicMap = (repoRoot: string, target: string): string => {
+  const [, file, firstLineText, lastLineText] = FILE_LINES_TARGET_PATTERN.exec(target) ?? []
+  if (file === undefined) {
+    return `why takes <file>:<line> or <file>:<line>-<line>, not "${target}"`
+  }
+  const firstLine = Number(firstLineText)
+  const lines = {
+    firstLine,
+    lastLine: lastLineText === undefined ? firstLine : Number(lastLineText),
+  }
+  const linesLabel = `${file}:${describeLineRange(lines)}`
+  if (!isFileInHead(repoRoot, file)) {
+    return `${linesLabel}: not committed yet (HEAD has no ${file})`
+  }
+  const { headLines, uncommittedLines } = toHeadLines(repoRoot, file, lines)
+  if (headLines === null) {
+    return `${linesLabel}: not committed yet (added since HEAD)`
+  }
+  const headLinesLabel = describeLineRange(headLines)
+  const commits = listLineCommitsOrNull(repoRoot, file, headLines)
+  if (commits === null) {
+    return `${linesLabel}: git log -L can't trace HEAD's lines ${headLinesLabel} of ${file}`
+  }
+  const isRenumbered = headLinesLabel !== describeLineRange(lines)
+  const headLinesNote = isRenumbered ? ` (${headLinesLabel} in HEAD)` : ''
+  const uncommittedNote =
+    uncommittedLines.length === 0
+      ? []
+      : [`changed since HEAD, not committed yet: ${describeLineNumbers(uncommittedLines)}`]
+  const shownCommits = commits.slice(0, MAX_COMMITS_SHOWN)
+  const olderCommitCount = commits.length - shownCommits.length
+  const olderCommitsNote =
+    olderCommitCount === 0
+      ? []
+      : [
+          `and ${countOf(olderCommitCount, 'older commit')}: git log -L${headLines.firstLine},${headLines.lastLine}:${file}`,
+        ]
+  return [
+    `${linesLabel}${headLinesNote}: ${countOf(commits.length, 'commit')}, newest first`,
+    ...uncommittedNote,
+    '',
+    ...shownCommits.map((commit) => `${commit.date} ${commit.hash} ${commit.subject}`),
+    ...olderCommitsNote,
+  ].join('\n')
+}
+
 // ---------- Command line ----------
 
 const USAGE = [
@@ -1276,6 +1442,7 @@ const USAGE = [
   '       bun logicmap.ts show [<domain> | <id> | <file>[:<line>[-<line>]]]',
   "                                           every domain; a domain's rules; one rule and its sites; a file's rules",
   "       bun logicmap.ts diff <id>           what changed under the id's sites since their last ack",
+  '       bun logicmap.ts why <file>:<line>[-<line>]  every commit that changed these lines, newest first',
 ].join('\n')
 
 const findRepoRoot = (): string =>
@@ -1322,6 +1489,10 @@ const runCommandLine = (commandLineArguments: string[]): number => {
   }
   if (command === 'diff' && commandArguments.length === 1) {
     console.log(diffLogicMap(repoRoot, commandArguments[0] ?? ''))
+    return 0
+  }
+  if (command === 'why' && commandArguments.length === 1) {
+    console.log(whyLogicMap(repoRoot, toShowTarget(repoRoot, commandArguments[0] ?? '')))
     return 0
   }
   if (command === 'show') {

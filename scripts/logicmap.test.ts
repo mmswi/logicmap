@@ -20,6 +20,7 @@ import {
   checkRepo,
   diffLogicMap,
   showLogicMap,
+  whyLogicMap,
 } from './logicmap.ts'
 
 const fixtureRepoRoots: string[] = []
@@ -43,6 +44,24 @@ const writeFixtureFiles = (repoRoot: string, contentByPath: Record<string, strin
 
 const readFixtureFile = (repoRoot: string, relativePath: string): string =>
   readFileSync(join(repoRoot, relativePath), 'utf8')
+
+const commitFixtureRepo = (repoRoot: string, message: string): void => {
+  execFileSync('git', ['add', '-A'], { cwd: repoRoot })
+  execFileSync(
+    'git',
+    [
+      '-c',
+      'user.name=fixture',
+      '-c',
+      'user.email=fixture@example.com',
+      'commit',
+      '--quiet',
+      '-m',
+      message,
+    ],
+    { cwd: repoRoot },
+  )
+}
 
 // The lock files in the fixture's logicmap/: each <domain>.lock, and the old single `lock`.
 const listFixtureLockFileNames = (repoRoot: string): string[] =>
@@ -1029,24 +1048,7 @@ describe('diff', () => {
       'logicmap/sync.md': closeDuringJoinEntry(1),
     })
     ackIds(repoRoot, ['sync.close-during-join'])
-    const commitAll = (): void => {
-      execFileSync('git', ['add', '-A'], { cwd: repoRoot })
-      execFileSync(
-        'git',
-        [
-          '-c',
-          'user.name=fixture',
-          '-c',
-          'user.email=fixture@example.com',
-          'commit',
-          '--quiet',
-          '-m',
-          'ack',
-        ],
-        { cwd: repoRoot },
-      )
-    }
-    commitAll()
+    commitFixtureRepo(repoRoot, 'ack')
     const writeRoom = (): void =>
       writeFixtureFiles(repoRoot, { 'src/room.ts': roomLines.join('\n') })
 
@@ -1068,6 +1070,41 @@ describe('diff', () => {
     const uncommittedAckDiff = diffLogicMap(repoRoot, 'sync.close-during-join')
     expect(uncommittedAckDiff).toContain('the ack is not committed yet, so from HEAD')
     expect(uncommittedAckDiff).toContain('+  joined.forgetConnection(connection)')
+  })
+})
+
+describe('why', () => {
+  test("a line's commits, newest first; one added since HEAD is not committed yet; lines added above it are followed", () => {
+    const roomLines = [
+      'const room = new Map()',
+      'export const joinRoom = () => {',
+      '  return room.size',
+      '}',
+      '',
+    ]
+    const repoRoot = createFixtureRepo({ 'src/room.ts': roomLines.join('\n') })
+    const writeRoom = (): void =>
+      writeFixtureFiles(repoRoot, { 'src/room.ts': roomLines.join('\n') })
+    commitFixtureRepo(repoRoot, 'wip: the room')
+    roomLines[2] = '  return room.size + 1'
+    writeRoom()
+    commitFixtureRepo(repoRoot, 'wip: the joiner counted')
+
+    const returnLineWhy = whyLogicMap(repoRoot, 'src/room.ts:3')
+    expect(returnLineWhy).toMatch(/\d{4}-\d{2}-\d{2} [0-9a-f]{7,} wip: the joiner counted/)
+    expect(returnLineWhy.indexOf('wip: the joiner counted')).toBeLessThan(
+      returnLineWhy.indexOf('wip: the room'),
+    )
+    expect(whyLogicMap(repoRoot, 'src/room.ts:1')).not.toContain('wip: the joiner counted')
+
+    roomLines.unshift('// the rooms of the open documents')
+    writeRoom()
+    const movedLineWhy = whyLogicMap(repoRoot, 'src/room.ts:4')
+    expect(movedLineWhy).toContain('wip: the joiner counted')
+    expect(movedLineWhy).toContain('wip: the room')
+    expect(whyLogicMap(repoRoot, 'src/room.ts:1')).toContain('not committed yet')
+    writeFixtureFiles(repoRoot, { 'src/fresh.ts': 'export const fresh = 1\n' })
+    expect(whyLogicMap(repoRoot, 'src/fresh.ts:1')).toContain('not committed yet')
   })
 })
 

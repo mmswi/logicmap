@@ -50,11 +50,11 @@ Measured on teamabled, 2026-11-02 (`e3405812`):
 ## Steps
 
 ### 1. From lines to their commits
-- [ ] A fixture helper that commits the fixture repo (lifted from the diff test's `commitAll`).
-- [ ] Failing test: a line changed by two commits lists both, newest first, each with its date, hash and subject; a
+- [x] A fixture helper that commits the fixture repo (lifted from the diff test's `commitAll`).
+- [x] Failing test: a line changed by two commits lists both, newest first, each with its date, hash and subject; a
   line added since HEAD and a line of an untracked file read "not committed yet"; with lines added above it, the
   typed line is traced, not HEAD's line of that number.
-- [ ] `whyLogicMap(repoRoot, target)`: the working tree's lines mapped to HEAD's, one `git log -L` call parsed per
+- [x] `whyLogicMap(repoRoot, target)`: the working tree's lines mapped to HEAD's, one `git log -L` call parsed per
   commit, 10 at most.
 Files: `scripts/logicmap.ts`, `scripts/logicmap.test.ts`
 
