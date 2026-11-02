@@ -1952,9 +1952,9 @@ const USAGE = [
   '       bun logicmap.ts show [<domain> | <id> | <file>[:<line>[-<line>]]]',
   "                                           every domain; a domain's rules; one rule and its sites; a file's rules",
   "       bun logicmap.ts diff <id>           what changed under the id's sites since their last ack",
-  '       bun logicmap.ts why <file>:<line>[-<line>] | <file>:<name>',
+  '       bun logicmap.ts why <file>:<line>[-<line>] | <file>:<name> | <id>',
   '                                           the rules over these lines, every commit that changed them, newest',
-  '                                           first, and the piece and the goal recorded with each',
+  "                                           first, and the piece and the goal recorded with each; a rule's history",
 ].join('\n')
 
 const findRepoRoot = (): string =>

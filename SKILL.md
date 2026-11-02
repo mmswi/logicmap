@@ -1,6 +1,6 @@
 ---
 name: logicmap
-description: "Logicmap: `§` anchors in code comments tied to a `logicmap/` ledger of decisions, invariants, edge cases and cross-file flows, plus a checker that flags anchors whose code changed. Use when a repo has a `logicmap/` folder or `§decision` / `§invariant` / `§edge` / `§flow` / `§uses` / `§test` comments (read the map before editing, deleting or explaining that code, and plan each task against it); when asked to map complex logic, edge cases or flows so agents can follow them and explain why, including in an old codebase where nothing records the reasons; or when setting the method up in a repo."
+description: "Logicmap: `§` anchors in code comments tied to a `logicmap/` ledger of decisions, invariants, edge cases and cross-file flows, plus a checker that flags anchors whose code changed. Use when a repo has a `logicmap/` folder or `§decision` / `§invariant` / `§edge` / `§flow` / `§uses` / `§test` comments (read the map before editing, deleting or explaining that code, ask it why a line is as it is, and plan each task against it); when asked to map complex logic, edge cases or flows so agents can follow them and explain why, including in an old codebase where nothing records the reasons; or when setting the method up in a repo."
 ---
 
 # Logicmap
@@ -26,6 +26,7 @@ bun ~/.claude/skills/logicmap/scripts/logicmap.ts check
 bun ~/.claude/skills/logicmap/scripts/logicmap.ts ack <id>...
 bun ~/.claude/skills/logicmap/scripts/logicmap.ts show [<domain> | <id> | <file>[:<line>[-<line>]]]
 bun ~/.claude/skills/logicmap/scripts/logicmap.ts diff <id>
+bun ~/.claude/skills/logicmap/scripts/logicmap.ts why <file>:<line>[-<line>] | <file>:<name> | <id>
 ```
 
 `show` reads the map from the widest view to the narrowest, each a few thousand tokens at most:
@@ -35,6 +36,18 @@ bun ~/.claude/skills/logicmap/scripts/logicmap.ts diff <id>
 - `show <id>`: one entry in full and every site, as `file:start-end`, flow steps in order.
 - `show <file>`: each rule in the file once, with the lines each of its sites covers.
 - `show <file>:<line>` or `<file>:<start>-<end>`: only the rules covering those lines.
+
+`why` says why code is as it is and how it got there, from git and the pieces recorded with each commit:
+
+- `why <file>:<line>` or `<file>:<start>-<end>`: the rules covering the lines, each with its why; then every
+  commit that changed them, newest first, each with the piece recorded with it (its What and Why) and its
+  task's goal. The lines are the file as it is now, uncommitted edits included.
+- `why <file>:<name>`: the same for the top-level declaration of that name.
+- `why <id>`: the rule, its why and its history; then every commit that changed its entry, each with the
+  piece naming the id.
+
+Run it before changing code this session didn't write, and first when a line misbehaves: the newest commit of
+the lines is where to look.
 
 ## Reading anchored code
 
@@ -53,9 +66,9 @@ bun ~/.claude/skills/logicmap/scripts/logicmap.ts diff <id>
      fact; give the why as inferred, with the evidence its `source` cites.
    - `changed`, `unacked` or `stale-pin`: code moved since anyone re-read the entry. Present the why as
      the recorded rationale, re-derive the behaviour from the code, and repair the map (next section).
-   - no anchor: look for the piece recorded with the line's commit (`git log -L`, then the step doc in
-     that commit; see "Working a task in a mapped repo"). It gives the reason the code was written, as
-     of that commit. Without one, derive from the code and `git log`, and say the reason is inferred.
+   - no anchor: `why <file>:<start>-<end>` (or `<file>:<name>`). The piece under a commit is the reason
+     the code was written, as of that commit. Under a commit with only its subject or its task's goal,
+     derive the reason from the code and the commit, and say it is inferred.
 
    An entry is a claim even when `ok`: the fingerprint proves the code has not moved since the last
    ack, not that the entry was right. When the code contradicts the entry, describe what the code
@@ -242,8 +255,8 @@ a plan file in the repo, and the plan names the rules each step touches.
 
    `Why` says what the piece solves, and names the alternative not taken when there was one. Add to
    the entry what happened while writing it: a deviation from the code shown, the output of the run
-   that confirmed it. Commit the entry in the same commit as its code: that is what lets `git blame`
-   on any line lead to the reason it was written (below).
+   that confirmed it. Commit the entry in the same commit as its code: that is what lets `why` on
+   any line lead to the reason it was written (below).
 6. **Revise the plan when a finding changes it.** A finding that changes a step (yours, a review's, a
    failing test's) changes the plan before more code: edit the steps and their rules, and add a
    `Revisions` line with the date, what changed, the finding and who found it.
@@ -253,14 +266,14 @@ a plan file in the repo, and the plan names the rules each step touches.
 Resuming a task: read its plan, then `show <id>` for each id it names, then `check`. The first step
 with an unticked sub-step is where the work stands.
 
-Why a line was written, and what it was meant to solve: `git log -L <n>,<n>:<file>` lists every commit
-that changed those lines, newest first; `git blame -w -C -C -L <n>,<n> <file>` finds the commit that
-wrote the line through whitespace changes and code moved between files, where a plain `git blame`
-stops at the move or the reformat. The commit's files include the step doc written with it; the piece
-in that doc that names the function or the file is the reason, as the agent that wrote the line
-recorded it. A piece describes the
-code as of its commit: compare it with the code today before repeating it. What must hold now is the
-logicmap entry, when the line has one.
+Why a line was written, and what it was meant to solve: `why <file>:<line>` follows each commit that
+changed the line to the step doc written with it and the piece in it that holds the line's code or names
+the file: the reason, as the agent that wrote the line recorded it. By hand it is `git log -L <n>,<n>:<file>`,
+`git show --name-only <hash>`, then the doc. `-L` stays inside one file: for code moved from another,
+`git blame -w -C -C -L <n>,<n> <file>` finds the commit that wrote it. A repo that squash-merges keeps one
+commit per branch, holding every piece of the branch; `why` picks the piece holding the line's code. A piece
+describes the code as of its commit: compare it with the code today before repeating it. What must hold now
+is the logicmap entry, which `why` prints first.
 
 The plan of the task that piece 2 above belongs to, `plans/03-viewers-may-rename/00-plan.md`:
 
@@ -294,7 +307,9 @@ Rules:
 `logicmap/` folder (anywhere else it prints nothing):
 
 - after a `Read`, the rules covering the lines read, with their claims and covered lines: in full the
-  first time a session reads a rule at its version, then named by id in one line;
+  first time a session reads a rule at its version, then named by id in one line. The first time a
+  session reads a committed code file, one more line: the newest commit of the lines read, the piece
+  recorded with it, and the `why` command for them;
 - after an `Edit`, `MultiEdit` or `Write`, the errors `check` reports in that file, with what to do;
 - at `Stop`, `check`'s errors, once, for a session that edited a file in the repo since its last stop:
   the agent resolves them, or tells the user why they stay. A session that only read is not asked, so one
@@ -341,11 +356,14 @@ the hook names, and `check` before a commit.
      reports as `stale-pin`, move those pins, and ack.
    - Roles: `decision`, `invariant`, `edge`, `flow` define a rule; `uses`, `test` point at one. Files
      that only talk about anchors go in `logicmap/ignore`. The full method: the `logicmap` skill.
+   - Why code is as it is: `logicmap why <file>:<line>` (or `<file>:<start>-<end>`, `<file>:<name>`, `<id>`):
+     the rules over the lines, then every commit that changed them with the piece recorded with it. Run
+     it before changing code you didn't write, and first when debugging.
    - A task starts with a plan (in `plans/<NN>-<task-slug>/` unless this file names another place):
      numbered steps, each listing the logicmap ids it relies on, changes, creates or retires. A
      decision the user makes goes into the plan at once, and into its entry with the code that
      implements it. Each piece of code is recorded in its step's doc (`## Piece N`: what, why, where,
-     the code) and committed with it, so `git blame` leads from a line to why it was written.
+     the code) and committed with it, so `logicmap why` leads from a line to why it was written.
    - An entry whose `source:` starts with `inferred` is an agent's reading of the code, not a recorded
      decision: when you repeat its why, say it is inferred and cite the evidence.
    ```

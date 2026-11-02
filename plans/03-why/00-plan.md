@@ -99,7 +99,7 @@ Files: `scripts/logicmap.ts`, `scripts/logicmap.test.ts`
 Files: `scripts/hook.ts`, `scripts/logicmap.test.ts`
 
 ### 7. The docs
-- [ ] `USAGE`; SKILL.md: the command list, "Reading anchored code" (no anchor → `why`), "Why a line was written" made
+- [x] `USAGE`; SKILL.md: the command list, "Reading anchored code" (no anchor → `why`), "Why a line was written" made
   `why` (a squash merge keeps one commit and its docs; teamabled merges keep each commit), the AGENTS.md snippet;
   README.
 - [ ] Teamabled's `CLAUDE.md` and `AGENTS.md` name `why` (a teamabled commit of its own).
