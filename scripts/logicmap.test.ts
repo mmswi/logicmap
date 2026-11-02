@@ -1250,6 +1250,37 @@ describe('why', () => {
       '  ## Piece 2: the lines around twenty-five  (names the file; holds none of these lines)',
     )
   })
+
+  test("an anchored line's why starts with the rules covering it, each with its claim and its why", () => {
+    const repoRoot = createFixtureRepo({
+      'src/room.ts': [
+        'export const joinSocket = () => {',
+        '  // §edge sync.close-during-join@1',
+        '  if (closedEarly) {',
+        '    joined.removeConnection(connection)',
+        '  }',
+        '  flushPending()',
+        '}',
+        '',
+      ].join('\n'),
+      'logicmap/sync.md': closeDuringJoinEntry(1),
+    })
+    ackIds(repoRoot, ['sync.close-during-join'])
+    commitFixtureRepo(repoRoot, 'wip: the join')
+
+    const removalWhy = whyLogicMap(repoRoot, 'src/room.ts:4')
+    expect(removalWhy).toContain(
+      [
+        'sync.close-during-join@1  edge  recorded  The socket can close while the join is loading.',
+        '  why: The join adds the connection before it resolves.',
+        '  2-5  §edge  ok',
+      ].join('\n'),
+    )
+    expect(removalWhy.indexOf('sync.close-during-join@1')).toBeLessThan(
+      removalWhy.indexOf('wip: the join'),
+    )
+    expect(whyLogicMap(repoRoot, 'src/room.ts:6')).not.toContain('sync.close-during-join')
+  })
 })
 
 describe('hook', () => {

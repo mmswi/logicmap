@@ -73,8 +73,8 @@ Files: `scripts/logicmap.ts`, `scripts/logicmap.test.ts`
 Files: `scripts/logicmap.ts`, `scripts/logicmap.test.ts`
 
 ### 3. The rules over the lines
-- [ ] Failing test: an anchored line's `why` starts with its rule's claim and `why:`.
-- [ ] `LedgerEntry` gains the parsed `why`; `why` prints the rules covering the lines above the commits.
+- [x] Failing test: an anchored line's `why` starts with its rule's claim and `why:`.
+- [x] `LedgerEntry` gains the parsed `why`; `why` prints the rules covering the lines above the commits.
 Files: `scripts/logicmap.ts`, `scripts/logicmap.test.ts`
 
 ### 4. A function as the target

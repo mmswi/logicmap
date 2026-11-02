@@ -99,6 +99,7 @@ export type LedgerEntry = {
   provenance: EntryProvenance
   what: string
   claim: string
+  why: string
   // Why no test proves it, when someone wrote so; such an entry raises no untested warning.
   untestedReason: string
   steps: FlowStep[]
@@ -385,6 +386,7 @@ const parseEntry = (entryBlock: EntryBlock): { entry: LedgerEntry; problems: Pro
       provenance,
       what,
       claim,
+      why: fieldByName.get('why')?.text ?? '',
       untestedReason: fieldByName.get('untested')?.text ?? '',
       steps,
       text,
@@ -1663,30 +1665,45 @@ const describeCommitReason = (repoRoot: string, commit: LineCommit, file: string
   return [...pieceLines, ...goalLines].map((reasonLine) => `  ${reasonLine}`)
 }
 
-// Why these lines are as they are: every commit that changed them, newest first, each with the piece
-// recorded with it and its task's goal.
-export const whyLogicMap = (repoRoot: string, target: string): string => {
-  const [, file, firstLineText, lastLineText] = FILE_LINES_TARGET_PATTERN.exec(target) ?? []
-  if (file === undefined) {
-    return `why takes <file>:<line> or <file>:<line>-<line>, not "${target}"`
+// The rules covering these lines as show <file> prints them, each with its why: what must hold now.
+const listRulesWithTheirWhy = (repoRoot: string, file: string, lines: LineRange): string[] => {
+  const views = createShowViews(repoRoot)
+  if (!views.isAnchoredFile(file)) {
+    return []
   }
-  const firstLine = Number(firstLineText)
-  const lines = {
-    firstLine,
-    lastLine: lastLineText === undefined ? firstLine : Number(lastLineText),
-  }
+  return views.listFileRuleSections(file, lines).flatMap((ruleSection) => {
+    const [ruleLine = '', ...siteLines] = ruleSection.text.split('\n')
+    const why = views.analysis.entriesById.get(ruleSection.id)?.why ?? ''
+    return [ruleLine, ...(why === '' ? [] : [`  why: ${why}`]), ...siteLines]
+  })
+}
+
+// A first line saying how many commits changed the lines, then each with its reason; a single line when
+// they aren't committed yet.
+const describeLinesHistory = (
+  repoRoot: string,
+  file: string,
+  lines: LineRange,
+): { summaryLines: string[]; commitLines: string[] } => {
   const linesLabel = `${file}:${describeLineRange(lines)}`
   if (!isFileInHead(repoRoot, file)) {
-    return `${linesLabel}: not committed yet (HEAD has no ${file})`
+    return {
+      summaryLines: [`${linesLabel}: not committed yet (HEAD has no ${file})`],
+      commitLines: [],
+    }
   }
   const { headLines, uncommittedLines } = toHeadLines(repoRoot, file, lines)
   if (headLines === null) {
-    return `${linesLabel}: not committed yet (added since HEAD)`
+    return {
+      summaryLines: [`${linesLabel}: not committed yet (added since HEAD)`],
+      commitLines: [],
+    }
   }
   const headLinesLabel = describeLineRange(headLines)
   const commits = listLineCommitsOrNull(repoRoot, file, headLines)
   if (commits === null) {
-    return `${linesLabel}: git log -L can't trace HEAD's lines ${headLinesLabel} of ${file}`
+    const untracedLine = `${linesLabel}: git log -L can't trace HEAD's lines ${headLinesLabel} of ${file}`
+    return { summaryLines: [untracedLine], commitLines: [] }
   }
   const isRenumbered = headLinesLabel !== describeLineRange(lines)
   const headLinesNote = isRenumbered ? ` (${headLinesLabel} in HEAD)` : ''
@@ -1702,17 +1719,42 @@ export const whyLogicMap = (repoRoot: string, target: string): string => {
       : [
           `and ${countOf(olderCommitCount, 'older commit')}: git log -L${headLines.firstLine},${headLines.lastLine}:${file}`,
         ]
-  return [
-    `${linesLabel}${headLinesNote}: ${countOf(commits.length, 'commit')}, newest first`,
-    ...uncommittedNote,
-    '',
-    ...shownCommits.flatMap((commit, commitIndex) => [
-      ...(commitIndex === 0 ? [] : ['']),
-      `${commit.date} ${commit.hash} ${commit.subject}`,
-      ...describeCommitReason(repoRoot, commit, file),
-    ]),
-    ...olderCommitsNote,
-  ].join('\n')
+  return {
+    summaryLines: [
+      `${linesLabel}${headLinesNote}: ${countOf(commits.length, 'commit')}, newest first`,
+      ...uncommittedNote,
+    ],
+    commitLines: [
+      ...shownCommits.flatMap((commit, commitIndex) => [
+        ...(commitIndex === 0 ? [] : ['']),
+        `${commit.date} ${commit.hash} ${commit.subject}`,
+        ...describeCommitReason(repoRoot, commit, file),
+      ]),
+      ...olderCommitsNote,
+    ],
+  }
+}
+
+// Why these lines are as they are: the rules covering them, then every commit that changed them, newest
+// first, each with the piece recorded with it and its task's goal.
+export const whyLogicMap = (repoRoot: string, target: string): string => {
+  const [, file, firstLineText, lastLineText] = FILE_LINES_TARGET_PATTERN.exec(target) ?? []
+  if (file === undefined) {
+    return `why takes <file>:<line> or <file>:<line>-<line>, not "${target}"`
+  }
+  const firstLine = Number(firstLineText)
+  const lines = {
+    firstLine,
+    lastLine: lastLineText === undefined ? firstLine : Number(lastLineText),
+  }
+  const ruleLines = listRulesWithTheirWhy(repoRoot, file, lines)
+  const rulesSection =
+    ruleLines.length === 0
+      ? []
+      : ['', 'rules covering these lines (show <id>: one in full):', ...ruleLines]
+  const { summaryLines, commitLines } = describeLinesHistory(repoRoot, file, lines)
+  const commitSection = commitLines.length === 0 ? [] : ['', ...commitLines]
+  return [...summaryLines, ...rulesSection, ...commitSection].join('\n')
 }
 
 // ---------- Command line ----------
