@@ -1106,6 +1106,150 @@ describe('why', () => {
     writeFixtureFiles(repoRoot, { 'src/fresh.ts': 'export const fresh = 1\n' })
     expect(whyLogicMap(repoRoot, 'src/fresh.ts:1')).toContain('not committed yet')
   })
+
+  test("each commit with its piece: by its code, else by its Where; a green piece with the red one's Why; the goal", () => {
+    const roomLines = [
+      'const room = new Map()',
+      'export const joinRoom = () => {',
+      '  return room.size',
+      '}',
+      '',
+    ]
+    const repoRoot = createFixtureRepo({ 'src/room.ts': roomLines.join('\n') })
+    const writeRoom = (): void =>
+      writeFixtureFiles(repoRoot, { 'src/room.ts': roomLines.join('\n') })
+    commitFixtureRepo(repoRoot, 'wip: the room')
+    roomLines[2] = '  return room.size + 1'
+    writeRoom()
+    writeFixtureFiles(repoRoot, {
+      'plans/05-room-counts/00-plan.md': [
+        '# The room counts its joiner',
+        '',
+        '## Goal',
+        '',
+        'Mihai, 2026-11-02: "count the joiner too"',
+        '',
+        'Done when a room of one says 1.',
+        '',
+      ].join('\n'),
+      'plans/05-room-counts/01-the-count.md': [
+        '# Step 1: the count',
+        '',
+        '## Piece 1: red, a room of one says 1',
+        'What: a test joins once and expects a size of 1.',
+        'Why: the size is read before the joiner is added,',
+        '  so a room of one says 0.',
+        'Where: `src/room.test.ts`',
+        '```ts',
+        'expect(joinRoom()).toBe(1)',
+        '```',
+        '',
+        '## Piece 2: green, joinRoom counts the joiner',
+        'What:',
+        'joinRoom returns the size plus the joiner.',
+        'Why: the smallest change that passes; a counter kept beside the map was rejected.',
+        'Where: `src/room.ts:3`',
+        '```ts',
+        '  return room.size + 1',
+        '```',
+        '',
+      ].join('\n'),
+    })
+    commitFixtureRepo(repoRoot, 'wip: the joiner counted')
+    roomLines[0] = 'const room = new Map<string, number>()'
+    writeRoom()
+    writeFixtureFiles(repoRoot, {
+      'notes/typed-room.md': [
+        '## Bucata 1: the room is typed',
+        'A wrong key fails to compile.',
+        'Where: `src/room.ts`',
+        '```ts',
+        'type RoomKey = string',
+        '```',
+        '',
+      ].join('\n'),
+    })
+    commitFixtureRepo(repoRoot, 'wip: the room typed')
+
+    const countWhy = whyLogicMap(repoRoot, 'src/room.ts:3')
+    expect(countWhy).toContain(
+      [
+        '  plans/05-room-counts/01-the-count.md',
+        '  ## Piece 2: green, joinRoom counts the joiner',
+        '  What: joinRoom returns the size plus the joiner.',
+        '  Why: the smallest change that passes; a counter kept beside the map was rejected.',
+        '  Why (Piece 1): the size is read before the joiner is added, so a room of one says 0.',
+        '  Goal (plans/05-room-counts/00-plan.md): Mihai, 2026-11-02: "count the joiner too"',
+      ].join('\n'),
+    )
+    expect(countWhy).not.toContain('Done when')
+    expect(countWhy.trimEnd().endsWith('wip: the room')).toBe(true)
+
+    const typedWhy = whyLogicMap(repoRoot, 'src/room.ts:1')
+    expect(typedWhy).toContain(
+      [
+        '  notes/typed-room.md',
+        '  ## Bucata 1: the room is typed  (names the file; holds none of these lines)',
+        '  A wrong key fails to compile.',
+      ].join('\n'),
+    )
+    expect(typedWhy).not.toContain('Goal')
+  })
+
+  test('of the pieces holding the code, one naming the file; of those naming it, the nearest Where', () => {
+    const roomLines = [
+      ...Array.from(
+        { length: 30 },
+        (_, lineIndex) => `const line${lineIndex + 1} = ${lineIndex + 1}`,
+      ),
+      '',
+    ]
+    const repoRoot = createFixtureRepo({ 'src/room.ts': roomLines.join('\n') })
+    const writeRoom = (): void =>
+      writeFixtureFiles(repoRoot, { 'src/room.ts': roomLines.join('\n') })
+    commitFixtureRepo(repoRoot, 'wip: the room')
+    roomLines[19] = "const line20 = 'twenty'"
+    writeRoom()
+    writeFixtureFiles(repoRoot, {
+      'notes/map.md': [
+        '## Bucata 1: the anchors',
+        '```ts',
+        "const line20 = 'twenty'",
+        '```',
+        '',
+      ].join('\n'),
+      'plans/07-words/01-twenty.md': [
+        '## Piece 3: line twenty says its word',
+        'Why: a number reads as a count.',
+        'Where: `src/room.ts:5`',
+        '```ts',
+        "const line20 = 'twenty'",
+        '```',
+        '',
+      ].join('\n'),
+    })
+    commitFixtureRepo(repoRoot, 'wip: twenty')
+    roomLines[24] = "const line25 = 'twenty-five'"
+    writeRoom()
+    writeFixtureFiles(repoRoot, {
+      'plans/08-more-words/01-the-rest.md': [
+        '## Piece 1: the top',
+        'Where: `src/room.ts:2`',
+        '',
+        '## Piece 2: the lines around twenty-five',
+        'Where: `src/room.ts:24-26, 40`',
+        '',
+      ].join('\n'),
+    })
+    commitFixtureRepo(repoRoot, 'wip: twenty-five')
+
+    expect(whyLogicMap(repoRoot, 'src/room.ts:20')).toContain(
+      '  plans/07-words/01-twenty.md\n  ## Piece 3: line twenty says its word\n',
+    )
+    expect(whyLogicMap(repoRoot, 'src/room.ts:25')).toContain(
+      '  ## Piece 2: the lines around twenty-five  (names the file; holds none of these lines)',
+    )
+  })
 })
 
 describe('hook', () => {

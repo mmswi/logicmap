@@ -36,8 +36,10 @@ Measured on teamabled, 2026-11-02 (`e3405812`):
   commit added in the hunk around the asked line (trimmed, 12 characters or more, so `}` and `)` never match), (b) a
   piece whose `Where:` names the file (its path, or the path past its first segment), (c) the goal of the task whose
   docs the commit holds (`## Goal` of the `00-plan.md` beside them), (d) the commit's subject alone. A piece is a
-  `## Piece N` or `## Bucata N` section in any `.md` the commit holds outside `logicmap/`. Rejected: matching on
-  `Where:`'s line numbers (they shift with every later edit); a setting naming the docs folder (each repo puts them
+  `## Piece N` or `## Bucata N` section in any `.md` the commit holds outside `logicmap/`. Among the pieces holding
+  the code, one whose Where names the file comes first; among those naming the file, the one whose Where lines are
+  nearest the traced lines as the commit numbers them (revision 1). Rejected: matching `Where:`'s line numbers
+  against HEAD's (they shift with every later edit); a setting naming the docs folder (each repo puts them
   elsewhere; the headings already mark them).
 - 2026-11-02, agent: per commit, newest first, 10 at most and the rest counted: its date, hash and subject, the doc's
   path, the piece's heading, its `What:` and `Why:` (the text up to the next field or code fence, on the same line or
@@ -59,10 +61,15 @@ Measured on teamabled, 2026-11-02 (`e3405812`):
 Files: `scripts/logicmap.ts`, `scripts/logicmap.test.ts`
 
 ### 2. From a commit to its piece
-- [ ] Failing tests: the piece holding the commit's code is shown with its What and Why; with no such piece, one whose
+- [x] Failing tests: the piece holding the commit's code is shown with its What and Why; with no such piece, one whose
   Where names the file; with neither, the task's goal; with no doc, the subject alone; a `## Bucata N` piece too; a
   green piece's empty Why followed by the red piece's.
-- [ ] The match, the fallbacks and the printing of decision 3.
+- [x] The match, the fallbacks and the printing of decision 3.
+- [x] Failing test (revision 1): of a mapping doc and a step doc both quoting the code, the piece naming the file;
+  of pieces naming the file, the one whose Where lines are nearest.
+- [x] The ranking.
+- [x] A piece headed green brings the red piece's reason (question 7: its own Why was long, the recorded reason
+  was the red piece's).
 Files: `scripts/logicmap.ts`, `scripts/logicmap.test.ts`
 
 ### 3. The rules over the lines
@@ -106,3 +113,10 @@ then a commit on `why`; the installed clone gets `main` by `merge --ff-only` onc
 ## Results
 
 ## Revisions
+
+1. 2026-11-02, step 2, found by the agent on teamabled: `why web/src/pages/DocumentEditorPage.tsx:958-966` showed
+   for 7 of its 10 commits the first piece naming the file, though each task's doc has several, and for the squash
+   `9636d652` a piece of the mapping doc (`logicmap/02-map-the-codebase/05-…`) that quotes the code with its anchors
+   and names no file in a Where. Decision 2 ranks them: a piece holding the code and naming the file first, then by
+   the nearest Where lines as of the commit, which the commit itself numbered (a Where line number only drifts
+   against later commits, the reason it was rejected). Step 2 gains a test and the ranking.

@@ -1387,7 +1387,284 @@ const listLineCommitsOrNull = (
   }
 }
 
-// Why these lines are as they are: every commit that changed them, newest first.
+// A recorded piece: a `## Piece N` section of a task's step doc (`## Bucata N` in older docs).
+const PIECE_HEADING_PATTERN = /^## ((?:Piece|Bucata) [^:\s]+)/
+const SECTION_START_PATTERN = /^(?=## )/m
+// A field line of a piece: `What:`, `Why:`, `Where:`, `Run (red):`, ...
+const PIECE_FIELD_PATTERN = /^[A-Z][a-z]+(?: [a-z]+)?(?: \([a-z]+\))?:(?: |$)/
+// A shorter added line (`}`, `return null`) is in many pieces, so it says nothing about which one.
+const MIN_MATCHED_LINE_LENGTH = 12
+const SHORT_REASON_LENGTH = 40
+const MAX_GOAL_LENGTH = 400
+const TASK_PLAN_FILE_NAME = '00-plan.md'
+
+type RecordedPiece = { label: string; heading: string; bodyLines: string[]; text: string }
+
+type FoundPiece = {
+  docPath: string
+  piece: RecordedPiece
+  previousPiece: RecordedPiece | undefined
+  isFoundByItsCode: boolean
+}
+
+const runGitOrEmpty = (repoRoot: string, gitArguments: string[]): string => {
+  try {
+    return runGit(repoRoot, gitArguments)
+  } catch {
+    return ''
+  }
+}
+
+const collapseWhitespace = (text: string): string => text.replace(/\s+/g, ' ').trim()
+
+const listRecordedPieces = (docText: string): RecordedPiece[] =>
+  docText.split(SECTION_START_PATTERN).flatMap((sectionText) => {
+    const [heading = '', ...bodyLines] = sectionText.trimEnd().split('\n')
+    const [, label] = PIECE_HEADING_PATTERN.exec(heading) ?? []
+    return label === undefined ? [] : [{ label, heading, bodyLines, text: sectionText }]
+  })
+
+const isPieceTextEnd = (line: string): boolean =>
+  line.trim() === '' || line.startsWith('```') || PIECE_FIELD_PATTERN.test(line)
+
+// A field's text: the rest of its line and the lines under it, up to a blank line, a code fence or a field.
+const readPieceField = (piece: RecordedPiece, labelStart: string): string => {
+  const labelIndex = piece.bodyLines.findIndex(
+    (line) => PIECE_FIELD_PATTERN.test(line) && line.startsWith(labelStart),
+  )
+  if (labelIndex === -1) {
+    return ''
+  }
+  const endIndex = piece.bodyLines.findIndex(
+    (line, lineIndex) => lineIndex > labelIndex && isPieceTextEnd(line),
+  )
+  const fieldText = piece.bodyLines
+    .slice(labelIndex, endIndex === -1 ? undefined : endIndex)
+    .join(' ')
+  return collapseWhitespace(fieldText.slice(fieldText.indexOf(':') + 1))
+}
+
+// The paragraph under an old piece's heading, written before pieces had fields.
+const readPieceParagraph = (piece: RecordedPiece): string => {
+  const firstTextIndex = piece.bodyLines.findIndex((line) => line.trim() !== '')
+  const firstTextLine = piece.bodyLines[firstTextIndex]
+  if (firstTextLine === undefined || isPieceTextEnd(firstTextLine)) {
+    return ''
+  }
+  const endIndex = piece.bodyLines.findIndex(
+    (line, lineIndex) => lineIndex > firstTextIndex && isPieceTextEnd(line),
+  )
+  return collapseWhitespace(
+    piece.bodyLines.slice(firstTextIndex, endIndex === -1 ? undefined : endIndex).join(' '),
+  )
+}
+
+const readPieceReason = (piece: RecordedPiece): string =>
+  readPieceField(piece, 'Why') || readPieceParagraph(piece)
+
+// A piece's Where gives line ranges after the file's name, as the commit numbered them: `room.ts:40-60, 90`.
+const WHERE_LINES_PATTERN = /^:(\d+(?:-\d+)?(?:, \d+(?:-\d+)?)*)/
+// The distance of a piece whose Where names the file with no line.
+const UNKNOWN_LINE_DISTANCE = Number.MAX_SAFE_INTEGER
+
+const listWhereLineRanges = (whereText: string, fileName: string): LineRange[] =>
+  whereText
+    .split(fileName)
+    .slice(1)
+    .flatMap((textAfterName) => {
+      const [, rangesText = ''] = WHERE_LINES_PATTERN.exec(textAfterName) ?? []
+      return rangesText === ''
+        ? []
+        : rangesText.split(', ').map((rangeText) => {
+            const [firstLine = 0, lastLine = firstLine] = rangeText.split('-').map(Number)
+            return { firstLine, lastLine }
+          })
+    })
+
+const lineDistance = (first: LineRange, second: LineRange): number =>
+  doLineRangesMeet(first, second)
+    ? 0
+    : Math.min(
+        Math.abs(first.firstLine - second.lastLine),
+        Math.abs(second.firstLine - first.lastLine),
+      )
+
+// The lines a commit added around the lines traced: those git log -L shows, and the rest of the commit's
+// hunks that meet them, since a piece often quotes the lines around the one asked about.
+const listAddedLinesAround = (
+  repoRoot: string,
+  commit: LineCommit,
+  fileAtCommit: string,
+  tracedLines: LineRange | null,
+): string[] => {
+  const commitHunks =
+    tracedLines === null
+      ? []
+      : hunksMeetingLines(
+          runGitOrEmpty(repoRoot, ['show', '-U0', '--format=', commit.hash, '--', fileAtCommit]),
+          tracedLines,
+        )
+  const addedLines = [commit.diffText, ...commitHunks]
+    .flatMap((diffText) => diffText.split('\n'))
+    .filter((diffLine) => diffLine.startsWith('+') && !diffLine.startsWith('+++'))
+    .map((diffLine) => diffLine.slice(1).trim())
+    .filter((addedLine) => addedLine.length >= MIN_MATCHED_LINE_LENGTH)
+  return [...new Set(addedLines)]
+}
+
+// The piece recorded with a commit for these lines, among the pieces of the docs the commit holds: of those
+// holding lines it added around them, one whose Where names the file (a mapping doc quotes code it didn't
+// write) and the most lines; else, of those naming the file, the one whose Where lines are nearest.
+const findRecordedPiece = (
+  repoRoot: string,
+  commit: LineCommit,
+  file: string,
+  docPaths: string[],
+): FoundPiece | null => {
+  const fileAtCommit = /^\+\+\+ b\/(.+)$/m.exec(commit.diffText)?.[1] ?? file
+  // A doc may name the file from its folder down: `teams/invites.ts` for `src/teams/invites.ts`.
+  const fileNames = [fileAtCommit, fileAtCommit.slice(fileAtCommit.indexOf('/') + 1)]
+  const tracedHunk = commit.diffText
+    .split(HUNK_START_PATTERN)
+    .map(parseDiffHunk)
+    .find((hunk) => hunk !== null)
+  const tracedLines =
+    tracedHunk === undefined
+      ? null
+      : { firstLine: tracedHunk.newFirstLine, lastLine: lastNewLineOf(tracedHunk) }
+  const addedLines = listAddedLinesAround(repoRoot, commit, fileAtCommit, tracedLines)
+  const pieceDocPaths = runGitOrEmpty(repoRoot, [
+    'grep',
+    '-l',
+    '-E',
+    '^## (Piece|Bucata) ',
+    commit.hash,
+    '--',
+    ...docPaths,
+  ])
+    .split('\n')
+    .filter((grepLine) => grepLine !== '')
+    .map((grepLine) => grepLine.slice(commit.hash.length + 1))
+  const scoredPieces = pieceDocPaths.flatMap((docPath) => {
+    const pieces = listRecordedPieces(
+      runGitOrEmpty(repoRoot, ['show', `${commit.hash}:${docPath}`]),
+    )
+    return pieces.map((piece, pieceIndex) => {
+      const whereText = readPieceField(piece, 'Where')
+      const whereLineDistances = fileNames
+        .flatMap((fileName) => listWhereLineRanges(whereText, fileName))
+        .map((whereLines) =>
+          tracedLines === null ? UNKNOWN_LINE_DISTANCE : lineDistance(whereLines, tracedLines),
+        )
+      return {
+        docPath,
+        piece,
+        previousPiece: pieces[pieceIndex - 1],
+        matchedLineCount: addedLines.filter((addedLine) => piece.text.includes(addedLine)).length,
+        isNamingTheFile: fileNames.some((fileName) => whereText.includes(fileName)),
+        whereLineDistance: Math.min(UNKNOWN_LINE_DISTANCE, ...whereLineDistances),
+      }
+    })
+  })
+  // By: holding the code, naming the file, the lines held, the nearest Where; a tie keeps the docs' order.
+  const [bestPiece] = scoredPieces
+    .filter((scoredPiece) => scoredPiece.matchedLineCount > 0 || scoredPiece.isNamingTheFile)
+    .sort(
+      (first, second) =>
+        Number(second.matchedLineCount > 0) - Number(first.matchedLineCount > 0) ||
+        Number(second.isNamingTheFile) - Number(first.isNamingTheFile) ||
+        second.matchedLineCount - first.matchedLineCount ||
+        first.whereLineDistance - second.whereLineDistance,
+    )
+  return bestPiece === undefined
+    ? null
+    : { ...bestPiece, isFoundByItsCode: bestPiece.matchedLineCount > 0 }
+}
+
+// The first paragraph of the Goal of the task plan beside the first of these docs that has one, as of the commit.
+const findTaskGoal = (
+  repoRoot: string,
+  commitHash: string,
+  docPaths: string[],
+): { planPath: string; goal: string } | null => {
+  const planPaths = new Set(
+    docPaths.map(
+      (docPath) => `${docPath.slice(0, docPath.lastIndexOf('/') + 1)}${TASK_PLAN_FILE_NAME}`,
+    ),
+  )
+  for (const planPath of planPaths) {
+    const goalSection = runGitOrEmpty(repoRoot, ['show', `${commitHash}:${planPath}`])
+      .split(SECTION_START_PATTERN)
+      .find((sectionText) => sectionText.startsWith('## Goal'))
+    const [firstParagraph = ''] = (goalSection ?? '')
+      .split('\n')
+      .slice(1)
+      .join('\n')
+      .trim()
+      .split(/\n\s*\n/)
+    const goal = collapseWhitespace(firstParagraph)
+    if (goal !== '') {
+      const isTooLong = goal.length > MAX_GOAL_LENGTH
+      return { planPath, goal: isTooLong ? `${goal.slice(0, MAX_GOAL_LENGTH)}…` : goal }
+    }
+  }
+  return null
+}
+
+const describePiece = ({
+  docPath,
+  piece,
+  previousPiece,
+  isFoundByItsCode,
+}: FoundPiece): string[] => {
+  const what = readPieceField(piece, 'What')
+  const why = readPieceField(piece, 'Why')
+  const paragraph = what === '' && why === '' ? readPieceParagraph(piece) : ''
+  // The code that passes a test is its own piece, after the test's: its reason is first the red piece's.
+  const isGreenPiece = /\bgreen\b/.test(piece.heading)
+  const isReasonShort = (why || paragraph).length < SHORT_REASON_LENGTH
+  const previousReason =
+    (isGreenPiece || isReasonShort) && previousPiece !== undefined
+      ? readPieceReason(previousPiece)
+      : ''
+  const foundByNote = isFoundByItsCode ? '' : '  (names the file; holds none of these lines)'
+  return [
+    docPath,
+    `${piece.heading}${foundByNote}`,
+    ...(what === '' ? [] : [`What: ${what}`]),
+    ...(why === '' ? [] : [`Why: ${why}`]),
+    ...(paragraph === '' ? [] : [paragraph]),
+    ...(previousReason === '' ? [] : [`Why (${previousPiece?.label}): ${previousReason}`]),
+  ]
+}
+
+// Under a commit: the piece recorded with it for these lines, and the goal of its task.
+const describeCommitReason = (repoRoot: string, commit: LineCommit, file: string): string[] => {
+  const docPaths = runGitOrEmpty(repoRoot, [
+    'show',
+    '--name-only',
+    '--diff-filter=d',
+    '--format=',
+    commit.hash,
+  ])
+    .split('\n')
+    .filter((path) => path.endsWith('.md') && !path.startsWith(`${LEDGER_DIRECTORY}/`))
+  if (docPaths.length === 0) {
+    return []
+  }
+  const foundPiece = findRecordedPiece(repoRoot, commit, file, docPaths)
+  const taskGoal = findTaskGoal(
+    repoRoot,
+    commit.hash,
+    foundPiece === null ? docPaths : [foundPiece.docPath],
+  )
+  const pieceLines = foundPiece === null ? [] : describePiece(foundPiece)
+  const goalLines = taskGoal === null ? [] : [`Goal (${taskGoal.planPath}): ${taskGoal.goal}`]
+  return [...pieceLines, ...goalLines].map((reasonLine) => `  ${reasonLine}`)
+}
+
+// Why these lines are as they are: every commit that changed them, newest first, each with the piece
+// recorded with it and its task's goal.
 export const whyLogicMap = (repoRoot: string, target: string): string => {
   const [, file, firstLineText, lastLineText] = FILE_LINES_TARGET_PATTERN.exec(target) ?? []
   if (file === undefined) {
@@ -1429,7 +1706,11 @@ export const whyLogicMap = (repoRoot: string, target: string): string => {
     `${linesLabel}${headLinesNote}: ${countOf(commits.length, 'commit')}, newest first`,
     ...uncommittedNote,
     '',
-    ...shownCommits.map((commit) => `${commit.date} ${commit.hash} ${commit.subject}`),
+    ...shownCommits.flatMap((commit, commitIndex) => [
+      ...(commitIndex === 0 ? [] : ['']),
+      `${commit.date} ${commit.hash} ${commit.subject}`,
+      ...describeCommitReason(repoRoot, commit, file),
+    ]),
     ...olderCommitsNote,
   ].join('\n')
 }
