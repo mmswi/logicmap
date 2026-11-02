@@ -26,7 +26,7 @@ changed) the agent without `why` listed the commits from `fc06c056` on and cited
 `why` it listed all five, back to F2 A2's `## Bucata 2`. Questions 1–4 and 7, one piece each, took one call with
 `why`, 3–4 without. Questions 8–10, June code with no piece, cost about the same either way: the answer is in the
 map or the old docs, which `why` prints only as rules (8, 9) or doesn't reach (10's `editor/01`, `editor/04` docs).
-The agent with `why`: 22 tool calls in all, 148k tokens, 273 s.
+In all: with `why` 22 tool calls, 148k tokens, 273 s; without, 42 tool calls, 162k tokens, 469 s.
 
 Findings:
 - Question 5's line is mine, and wrong: `document-events.ts:189` is the share's call of the writer; the thread's is
