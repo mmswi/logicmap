@@ -13,9 +13,11 @@ records exactly that knowledge and ties it to the code with three parts:
   on a piece of knowledge. One id, grepped, returns every anchored site;
 - **ledger**: `logicmap/<domain>.md`, one entry per id: what holds, why, what was rejected, what breaks;
 - **lock**: `logicmap/<domain>.lock` beside each ledger file, a fingerprint of the code under every
-  anchor and of every entry, so the checker knows when code changed under a rationale nobody re-read.
-  Only `ack` writes it, and an ack rewrites only the lock of its own domain. A repo with the single
-  `logicmap/lock` of earlier versions is read as is, and split by its next ack.
+  defining anchor (`decision`, `invariant`, `edge`, `flow`) and of every entry, so the checker knows
+  when code changed under a rationale nobody re-read. A `uses` or `test` site is not in it: its version
+  pin is all it claims, and `stale-pin` checks that. Only `ack` writes the lock, and an ack rewrites only
+  the lock of its own domain. A repo with the single `logicmap/lock` of earlier versions is read as is,
+  and split by its next ack.
 
 The checker, run from anywhere inside the repo:
 
@@ -23,6 +25,7 @@ The checker, run from anywhere inside the repo:
 bun ~/.claude/skills/logicmap/scripts/logicmap.ts check
 bun ~/.claude/skills/logicmap/scripts/logicmap.ts ack <id>...
 bun ~/.claude/skills/logicmap/scripts/logicmap.ts show [<domain> | <id> | <file>[:<line>[-<line>]]]
+bun ~/.claude/skills/logicmap/scripts/logicmap.ts diff <id>
 ```
 
 `show` reads the map from the widest view to the narrowest, each a few thousand tokens at most:
@@ -69,13 +72,16 @@ bun ~/.claude/skills/logicmap/scripts/logicmap.ts show [<domain> | <id> | <file>
 
 After every edit to anchored code, run `check` and resolve each line it prints:
 
-- `changed` or `unacked`: re-read the entry against the new code.
+- `changed` or `unacked`: re-read the entry against the new code; `diff <id>` prints what changed under
+  each such site since its last ack. When the message says the anchor covers more than 60 lines and the
+  edit was beside the rule, move the anchor to the smaller block that holds the rule.
   - The entry still holds → `ack <id>`.
   - The entry no longer holds → **bump**: in the entry set `version: N+1`, rewrite `what` / `why`, add a
     `history:` line; move the definition anchor's pin to `@N+1`. `check` now reports every other site as
     `stale-pin`: open each, re-verify it against the new entry, fix the code if needed, move its pin.
     Then `ack <id>`.
-- Moved code: the anchors move with it; `ack <id>`.
+- Moved code: the anchors move with it. A site whose code is as it was acked, in another file or under
+  another number, is no problem; `ack <id>` rewrites its key. Moved and edited, it is `unacked`.
 - Deleted logic: delete its anchors, set `status: retired` with a `history:` line saying why, `ack <id>`
   (which also drops the `gone` lock lines). A retired id is never reused.
 - Any other error names its fix in the message (`orphan-entry`, `duplicate-definition`,
@@ -135,13 +141,18 @@ Done when `check` exits 0 and `show <id>` lists every site you meant.
 
 An anchor covers its own line when code precedes it (`return null // §edge ...`), otherwise the first
 code line below its comment, plus everything indented under that line and the closing bracket lines
-(`}`, `} else {`, `)`) at its indentation. The fingerprint hashes that span, whitespace ignored.
+(`}`, `} else {`, `)`) at its indentation. The fingerprint hashes that span, whitespace and comment-only
+lines left out (`//` lines, `/* */` blocks, `# ` and `-- ` lines, `<!--`), so rewording a comment asks no
+ack; a comment after code on its line counts. Lock lines taken so start with `v2:`. A line without it was
+taken with the comments and is compared that way; an ack renews such lines of its domain whose code is
+still as locked, so nothing is acked unread.
 
 `check` enforces: each `decision`, `invariant` and `edge` id has exactly one defining anchor; each flow
 step has at least one site unless marked `(external)`; every anchor pins the entry's version; the role
-matches the entry's kind; retired ids have no anchors; every active entry has a site; every anchor and
-entry fingerprint matches the lock. It warns when an `edge` or `invariant` has no `test` anchor, and when
-the first sentence of an active entry's `what` is over 200 characters (`long-what`).
+matches the entry's kind; retired ids have no anchors; every active entry has a site; every defining
+anchor's and entry's fingerprint matches the lock. It warns when an `edge` or `invariant` has no `test`
+anchor and no `untested:` field, and when the first sentence of an active entry's `what` is over 200
+characters (`long-what`).
 
 ## Ledger entry
 
@@ -168,7 +179,8 @@ history:
   ADR, a PR or issue, a commit message, `confirmed by <name> <date>`. `show` prints `inferred` or
   `recorded` beside every entry.
 - Optional: `rejected` (alternative → why not), `breaks-if`, `revisit-if` (the condition that reopens
-  it), `status` (`active` default, or `retired`), `history`.
+  it), `untested` (why no test proves this `edge` or `invariant`: a timing no test can stop at, a check
+  only a person in a browser can make), `status` (`active` default, or `retired`), `history`.
 - Flow entries add `steps:`, one `N. text` line per step; append `(external)` to a step with no code in
   this repo (a user clicking an email link).
 - A line indented under a field continues it. The file is `logicmap/<domain>.md`; the heading is the id.
@@ -281,7 +293,8 @@ Rules:
 `scripts/hook.ts` puts the map in front of the agent without being asked, in every repo with a
 `logicmap/` folder (anywhere else it prints nothing):
 
-- after a `Read`, the rules covering the lines read, with their claims and covered lines;
+- after a `Read`, the rules covering the lines read, with their claims and covered lines: in full the
+  first time a session reads a rule at its version, then named by id in one line;
 - after an `Edit`, `MultiEdit` or `Write`, the errors `check` reports in that file, with what to do;
 - at `Stop`, `check`'s errors, once, for a session that edited a file in the repo since its last stop:
   the agent resolves them, or tells the user why they stay. A session that only read is not asked, so one
@@ -323,8 +336,8 @@ the hook names, and `check` before a commit.
    - On a cold start, `logicmap show`: every domain and its rule ids. Before editing or explaining
      anchored code: `logicmap show <file>` (or `<file>:<start>-<end>`), then `logicmap show <id>` for
      each id you touch (its entry and every anchored site, flow steps in order).
-   - After editing: `logicmap check`, and resolve each line it prints: `logicmap ack <id>` when the entry
-     still holds; when its meaning changed, bump the entry's `version`, re-verify every site `check` then
+   - After editing: `logicmap check`, and resolve each line it prints (`logicmap diff <id>` shows what
+     changed under its sites): `logicmap ack <id>` when the entry still holds; when its meaning changed, bump the entry's `version`, re-verify every site `check` then
      reports as `stale-pin`, move those pins, and ack.
    - Roles: `decision`, `invariant`, `edge`, `flow` define a rule; `uses`, `test` point at one. Files
      that only talk about anchors go in `logicmap/ignore`. The full method: the `logicmap` skill.

@@ -9,8 +9,8 @@ rejected, or why a line that looks redundant is there. A logicmap records that, 
   rule;
 - **ledger**: `logicmap/<domain>.md`, one entry per rule: what holds, why, what was rejected, what
   breaks, and where the claim comes from;
-- **lock**: `logicmap/<domain>.lock`, a fingerprint of the code under every anchor, so the checker
-  knows when code changed under a rule nobody re-read.
+- **lock**: `logicmap/<domain>.lock`, a fingerprint of the code under every defining anchor (comments
+  left out) and of every entry, so the checker knows when code changed under a rule nobody re-read.
 
 `SKILL.md` is the full method. `mapping-an-existing-repo.md` is the procedure for a codebase where
 nobody wrote the reasons down.
@@ -45,6 +45,7 @@ logicmap.ts show <id>                    one rule in full and every site, with t
 logicmap.ts show <file>[:<line>[-<line>]]  the rules in a file, or covering those lines
 logicmap.ts check                        every disagreement; exits 1 on any error
 logicmap.ts ack <id>...                  record that you re-read these rules against their code
+logicmap.ts diff <id>                    what changed under the id's sites since their last ack
 ```
 
 `logicmap.ts` is `bun ~/.claude/skills/logicmap/scripts/logicmap.ts`.

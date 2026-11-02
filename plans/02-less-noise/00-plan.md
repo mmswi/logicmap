@@ -102,9 +102,9 @@ Files: `scripts/hook.ts`, `scripts/logicmap.ts`, `scripts/logicmap.test.ts`
 Files: `scripts/logicmap.ts`, `scripts/logicmap.test.ts`
 
 ### 8. The docs and the install
-- [ ] SKILL.md: the lock section (what it fingerprints, `v2:`, moves), `untested:` in the entry format,
+- [x] SKILL.md: the lock section (what it fingerprints, `v2:`, moves), `untested:` in the entry format,
   the hook, `diff`; README's commands.
-- [ ] Strict tsc and biome with teamabled's configs, `bun test`; on teamabled the worktree's `check`
+- [x] Strict tsc and biome with teamabled's configs, `bun test`; on teamabled the worktree's `check`
   prints what the live one does, less the noise.
 - [ ] `--ff-only` into `~/.claude/skills/logicmap`; the board `notes/logicmap-methodology-tasks`.
 
@@ -112,6 +112,16 @@ Teamabled's side (its lock files compacted, the 27 warnings, the long anchors) i
 `explanatory-docs/logicmap/06-less-noise-in-teamabled/` in teamabled.
 
 ## Results
+
+- 32 tests pass (25 before the task); strict tsc and biome clean with teamabled's configs.
+- On teamabled as it is, `check` prints the same 27 warnings and no error; nothing turned `changed` when
+  the checker changed (the lock lines without `v2:` compared as before).
+- On a throwaway worktree of teamabled, one edit in `finishMergesAfterCommit` (a log message under three
+  anchors): the checker of before reports 5 errors (its edge, the flow step over the function, three
+  `uses` sites), this one 2; `diff teams.merge-cleanup-survives-a-failed-announcement` prints the one-line
+  hunk since `62cbc747`.
+- What teamabled itself gets (its lock files compacted, the warnings answered, its long anchors) is its
+  task 06.
 
 ## Revisions
 
