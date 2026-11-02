@@ -1281,6 +1281,39 @@ describe('why', () => {
     )
     expect(whyLogicMap(repoRoot, 'src/room.ts:6')).not.toContain('sync.close-during-join')
   })
+
+  test("a declaration's why: its lines in the file as it is now, up to the next declaration's comment", () => {
+    const roomLines = [
+      'export const joinRoom = () => {',
+      '  return rooms.size',
+      '}',
+      '',
+      '// Leaving empties the room.',
+      'export const leaveRoom = () => {',
+      '  rooms.clear()',
+      '}',
+      '',
+    ]
+    const repoRoot = createFixtureRepo({ 'src/room.ts': roomLines.join('\n') })
+    const writeRoom = (): void =>
+      writeFixtureFiles(repoRoot, { 'src/room.ts': roomLines.join('\n') })
+    commitFixtureRepo(repoRoot, 'wip: the rooms')
+    roomLines[6] = '  rooms.delete(roomId)'
+    writeRoom()
+    commitFixtureRepo(repoRoot, 'wip: a leave deletes its room')
+    roomLines.unshift('// the rooms of the open documents')
+    writeRoom()
+
+    const leaveWhy = whyLogicMap(repoRoot, 'src/room.ts:leaveRoom')
+    expect(leaveWhy).toStartWith('src/room.ts:leaveRoom (7-9) (6-8 in HEAD): 2 commits')
+    expect(leaveWhy).toContain('wip: a leave deletes its room')
+    expect(whyLogicMap(repoRoot, 'src/room.ts:joinRoom')).toStartWith(
+      'src/room.ts:joinRoom (2-4) (1-3 in HEAD): 1 commit',
+    )
+    expect(whyLogicMap(repoRoot, 'src/room.ts:enterRoom')).toBe(
+      'no line at the top level of src/room.ts names enterRoom',
+    )
+  })
 })
 
 describe('hook', () => {

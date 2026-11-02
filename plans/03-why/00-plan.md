@@ -46,8 +46,8 @@ Measured on teamabled, 2026-11-02 (`e3405812`):
   below), the previous piece's `Why:` when this one's is under 40 characters, and the goal's first paragraph cut at
   400 characters. Above the commits, the rules covering the lines with their claim and `why:`.
 - 2026-11-02, agent: `why` only reads; it writes no lock and no session file, so it can never turn `check` red.
-- 2026-11-02, agent: targets `<file>:<line>`, `<file>:<start>-<end>`, `<file>:<function>` (git's own function range,
-  on HEAD) and `<id>`.
+- 2026-11-02, agent: targets `<file>:<line>`, `<file>:<start>-<end>`, `<file>:<name>` (the top-level declaration's
+  lines in the working tree, revision 2) and `<id>`.
 
 ## Steps
 
@@ -78,8 +78,8 @@ Files: `scripts/logicmap.ts`, `scripts/logicmap.test.ts`
 Files: `scripts/logicmap.ts`, `scripts/logicmap.test.ts`
 
 ### 4. A function as the target
-- [ ] Failing test: `<file>:<function>` lists the commits of the function's lines.
-- [ ] The target parsed; `-L :<function>:<file>`.
+- [x] Failing test: `<file>:<function>` lists the commits of the function's lines.
+- [x] The target parsed; the declaration's lines found in the working tree (revision 2).
 Files: `scripts/logicmap.ts`, `scripts/logicmap.test.ts`
 
 ### 5. A rule's history
@@ -120,3 +120,7 @@ then a commit on `why`; the installed clone gets `main` by `merge --ff-only` onc
    and names no file in a Where. Decision 2 ranks them: a piece holding the code and naming the file first, then by
    the nearest Where lines as of the commit, which the commit itself numbered (a Where line number only drifts
    against later commits, the reason it was rejected). Step 2 gains a test and the ranking.
+2. 2026-11-02, step 4, found by the agent writing its test: `git log -L :<name>:<file>` takes HEAD's range, so an
+   edit above the function makes the rules and the uncommitted note read other lines, and its range runs to the next
+   top-level line, taking the next declaration's comment and anchors. Decision 5 finds the declaration in the working
+   tree and drops the blank and comment lines at its end; the lines then go through the same mapping as typed lines.

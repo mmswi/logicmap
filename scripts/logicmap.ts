@@ -1678,14 +1678,48 @@ const listRulesWithTheirWhy = (repoRoot: string, file: string, lines: LineRange)
   })
 }
 
+// `src/room.ts:joinRoom`: the lines of the declaration of that name.
+const FILE_NAME_TARGET_PATTERN = /^(.+):([A-Za-z_$][\w$]*)$/
+// A line at the top level of a file as git's default funcname sees one: it starts with a letter, _ or $.
+const TOP_LEVEL_LINE_PATTERN = /^[A-Za-z_$]/
+
+// The lines of the top-level declaration naming this, in the file as it is now: from its line to the line before
+// the next top-level line, as git log -L :<name>:<file> takes them, less the blank and comment lines at its end
+// (the next declaration's comment and anchors).
+const findDeclarationLines = (repoRoot: string, file: string, name: string): LineRange | null => {
+  const filePath = join(repoRoot, file)
+  if (!existsSync(filePath)) {
+    return null
+  }
+  const fileLines = readFileSync(filePath, 'utf8').split('\n')
+  const namePattern = new RegExp(`(?<![\\w$])${name.replaceAll('$', '\\$')}(?![\\w$])`)
+  const declarationIndex = fileLines.findIndex(
+    (line) => TOP_LEVEL_LINE_PATTERN.test(line) && namePattern.test(line),
+  )
+  if (declarationIndex === -1) {
+    return null
+  }
+  const nextTopLevelIndex = fileLines.findIndex(
+    (line, lineIndex) => lineIndex > declarationIndex && TOP_LEVEL_LINE_PATTERN.test(line),
+  )
+  const endIndex = nextTopLevelIndex === -1 ? fileLines.length : nextTopLevelIndex
+  const lastCodeIndex = fileLines
+    .slice(0, endIndex)
+    .findLastIndex((line) => line.trim() !== '' && !COMMENT_LINE_PATTERN.test(line))
+  return {
+    firstLine: declarationIndex + 1,
+    lastLine: Math.max(lastCodeIndex, declarationIndex) + 1,
+  }
+}
+
 // A first line saying how many commits changed the lines, then each with its reason; a single line when
 // they aren't committed yet.
 const describeLinesHistory = (
   repoRoot: string,
   file: string,
   lines: LineRange,
+  linesLabel: string,
 ): { summaryLines: string[]; commitLines: string[] } => {
-  const linesLabel = `${file}:${describeLineRange(lines)}`
   if (!isFileInHead(repoRoot, file)) {
     return {
       summaryLines: [`${linesLabel}: not committed yet (HEAD has no ${file})`],
@@ -1735,26 +1769,45 @@ const describeLinesHistory = (
   }
 }
 
-// Why these lines are as they are: the rules covering them, then every commit that changed them, newest
-// first, each with the piece recorded with it and its task's goal.
-export const whyLogicMap = (repoRoot: string, target: string): string => {
-  const [, file, firstLineText, lastLineText] = FILE_LINES_TARGET_PATTERN.exec(target) ?? []
-  if (file === undefined) {
-    return `why takes <file>:<line> or <file>:<line>-<line>, not "${target}"`
-  }
-  const firstLine = Number(firstLineText)
-  const lines = {
-    firstLine,
-    lastLine: lastLineText === undefined ? firstLine : Number(lastLineText),
-  }
+// The rules covering the lines, then every commit that changed them, newest first, each with the piece
+// recorded with it and its task's goal.
+const explainLines = (
+  repoRoot: string,
+  file: string,
+  lines: LineRange,
+  linesLabel: string,
+): string => {
   const ruleLines = listRulesWithTheirWhy(repoRoot, file, lines)
   const rulesSection =
     ruleLines.length === 0
       ? []
       : ['', 'rules covering these lines (show <id>: one in full):', ...ruleLines]
-  const { summaryLines, commitLines } = describeLinesHistory(repoRoot, file, lines)
+  const { summaryLines, commitLines } = describeLinesHistory(repoRoot, file, lines, linesLabel)
   const commitSection = commitLines.length === 0 ? [] : ['', ...commitLines]
   return [...summaryLines, ...rulesSection, ...commitSection].join('\n')
+}
+
+// Why some lines, or a declaration, are as they are.
+export const whyLogicMap = (repoRoot: string, target: string): string => {
+  const [, fileOfLines, firstLineText, lastLineText] = FILE_LINES_TARGET_PATTERN.exec(target) ?? []
+  if (fileOfLines !== undefined) {
+    const firstLine = Number(firstLineText)
+    const lines = {
+      firstLine,
+      lastLine: lastLineText === undefined ? firstLine : Number(lastLineText),
+    }
+    return explainLines(repoRoot, fileOfLines, lines, `${fileOfLines}:${describeLineRange(lines)}`)
+  }
+  const [, fileOfName, declarationName] = FILE_NAME_TARGET_PATTERN.exec(target) ?? []
+  if (fileOfName !== undefined && declarationName !== undefined) {
+    const declarationLines = findDeclarationLines(repoRoot, fileOfName, declarationName)
+    if (declarationLines === null) {
+      return `no line at the top level of ${fileOfName} names ${declarationName}`
+    }
+    const declarationLabel = `${fileOfName}:${declarationName} (${describeLineRange(declarationLines)})`
+    return explainLines(repoRoot, fileOfName, declarationLines, declarationLabel)
+  }
+  return `why takes <file>:<line>[-<line>] or <file>:<name>, not "${target}"`
 }
 
 // ---------- Command line ----------
@@ -1765,7 +1818,9 @@ const USAGE = [
   '       bun logicmap.ts show [<domain> | <id> | <file>[:<line>[-<line>]]]',
   "                                           every domain; a domain's rules; one rule and its sites; a file's rules",
   "       bun logicmap.ts diff <id>           what changed under the id's sites since their last ack",
-  '       bun logicmap.ts why <file>:<line>[-<line>]  every commit that changed these lines, newest first',
+  '       bun logicmap.ts why <file>:<line>[-<line>] | <file>:<name>',
+  '                                           the rules over these lines, every commit that changed them, newest',
+  '                                           first, and the piece and the goal recorded with each',
 ].join('\n')
 
 const findRepoRoot = (): string =>
@@ -1774,7 +1829,7 @@ const findRepoRoot = (): string =>
 // A path typed from any directory becomes the repo-relative path anchors are recorded under.
 const toShowTarget = (repoRoot: string, typedTarget: string): string => {
   const [, typedFile = typedTarget, lineSuffix = ''] =
-    /^(.+?)(:\d+(?:-\d+)?)?$/.exec(typedTarget) ?? []
+    /^(.+?)(:\d+(?:-\d+)?|:[A-Za-z_$][\w$]*)?$/.exec(typedTarget) ?? []
   const typedPath = resolve(process.cwd(), typedFile)
   return existsSync(typedPath)
     ? `${relative(repoRoot, typedPath).split(sep).join('/')}${lineSuffix}`
