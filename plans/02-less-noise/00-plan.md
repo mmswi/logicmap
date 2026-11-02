@@ -106,7 +106,7 @@ Files: `scripts/logicmap.ts`, `scripts/logicmap.test.ts`
   the hook, `diff`; README's commands.
 - [x] Strict tsc and biome with teamabled's configs, `bun test`; on teamabled the worktree's `check`
   prints what the live one does, less the noise.
-- [ ] `--ff-only` into `~/.claude/skills/logicmap`; the board `notes/logicmap-methodology-tasks`.
+- [x] `--ff-only` into `~/.claude/skills/logicmap`; the board `notes/logicmap-methodology-tasks`.
 
 Teamabled's side (its lock files compacted, the 27 warnings, the long anchors) is the task
 `explanatory-docs/logicmap/06-less-noise-in-teamabled/` in teamabled.
