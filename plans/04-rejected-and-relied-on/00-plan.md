@@ -53,6 +53,18 @@ Files: `SKILL.md`, `README.md`, `scripts/hook.ts`
 - [ ] Results here; merge into the installed clone; its tests; the board's rows #14 and #12's safety gap.
 
 ## Results
+- `why` prints each rule's `rejected:` under its `why:` (`467b0fe`); on teamabled `why
+  src/teams/merge-direct-groups.ts:459` now names "relying on the token's lifetime (R1, B)" under
+  `calls.out-of-the-conversation-out-of-the-call@1`.
+- After an edit, the hook names the rules whose `uses` or `test` sites cover lines changed since HEAD, once per file,
+  rule version and session, and none `check`'s errors already name (`8771b41`, `b9e982d`). On a teamabled worktree:
+  an edit of `merge-direct-groups.ts:457` named `calls.out-of-the-conversation-out-of-the-call@1` and
+  `access.resolved-once-per-connection@5` (their `uses` sites, 441-481 and 442-481) beside `check`'s `changed` on the
+  flow step it also touched; an edit of the test file named `teams.one-direct-group-per-people@3` (`§test` 107-177);
+  a second edit named nothing; a file with no anchors, nothing.
+- Cost per Edit, best of three: 0.16–0.18 s, against 0.15–0.16 s for the installed hook. 43 tests.
+- Ceiling: the diff is against HEAD, so a file's uncommitted edits from before the session name their rules at its
+  first edit; once per file and session keeps it to one note.
 
 ## Revisions
 - 2026-11-02, the agent: step 4's measure ran before step 3, and added step 2's piece 5 (one analysis per edit):
