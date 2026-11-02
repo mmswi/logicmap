@@ -73,9 +73,9 @@ Files: `scripts/logicmap.ts`, `scripts/logicmap.test.ts`
 Files: `scripts/logicmap.ts`, `scripts/logicmap.test.ts`
 
 ### 3. A site that moved is not reported
-- [ ] Failing test: a file renamed with its anchors is no lock problem; renamed and edited, it is
-  `unacked` and its old line `gone`.
-- [ ] `checkLock` pairs an `unacked` site with a `gone` line of the same id, role and fingerprint.
+- [x] Failing test: a file renamed with its anchors is no lock problem; renamed and edited, it is
+  `unacked` and its old line `gone`; a flow anchor renumbered by one added above it is no problem.
+- [x] `checkLock` lets each site claim the line of its id and role that holds its code.
 Files: `scripts/logicmap.ts`, `scripts/logicmap.test.ts`
 
 ### 4. A long block says so when it asks for an ack
@@ -114,3 +114,7 @@ Teamabled's side (its lock files compacted, the 27 warnings, the long anchors) i
 ## Results
 
 ## Revisions
+
+- 2026-11-02, step 3, agent: a site claims any unclaimed line of its id and role that holds its code, not
+  only a `gone` one: a new anchor of the same id above others renumbers them, and their lines are not
+  `gone`, only under other numbers (found writing the test).

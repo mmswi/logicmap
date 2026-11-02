@@ -787,24 +787,52 @@ const isAsLocked = (lockSite: LockSite, lockedSite: LockedSite): boolean => {
   return lockedSite.version === lockSite.version && lockedSite.fingerprint === currentFingerprint
 }
 
+// "<id> <role>": a site moved to another file, or renumbered in its own, keeps them.
+const idAndRoleOfLockKey = (key: string): string => key.split(' ').slice(0, 2).join(' ')
+
+/*
+ * Each site in the lock claims the lock line that holds its code, so a site that moved is no problem:
+ *
+ *   1. its own key, its code as locked                          → as locked
+ *   2. another unclaimed key of its id and role, its code there  → moved (another file, or renumbered)
+ *   3. its own key, unclaimed, other code                        → changed
+ *   4. none                                                      → unacked
+ *   a lock line no site claimed                                  → gone
+ */
 const checkLock = (lockSites: LockSite[], lockedSitesByKey: Map<string, LockedSite>): Problem[] => {
   const problems: Problem[] = []
-  const sitesInLock = lockSites.filter((lockSite) => lockSite.isInLock)
-  for (const lockSite of sitesInLock) {
-    const lockedSite = lockedSitesByKey.get(lockSite.key)
-    if (lockedSite === undefined) {
-      const message = `${lockSite.label} is not in the lock (new, or moved): verify it, then ack ${lockSite.id}`
-      problems.push(errorAt(PROBLEM_CODES.unacked, lockSite, lockSite.id, message))
-      continue
+  const claimedKeys = new Set<string>()
+  const claimLockLineOf = (lockSite: LockSite, key: string): boolean => {
+    const lockedSite = lockedSitesByKey.get(key)
+    const isClaimable =
+      lockedSite !== undefined && !claimedKeys.has(key) && isAsLocked(lockSite, lockedSite)
+    if (isClaimable) {
+      claimedKeys.add(key)
     }
-    if (!isAsLocked(lockSite, lockedSite)) {
+    return isClaimable
+  }
+  const sitesNotAsLocked = lockSites
+    .filter((lockSite) => lockSite.isInLock)
+    .filter((lockSite) => !claimLockLineOf(lockSite, lockSite.key))
+  const sitesNotMoved = sitesNotAsLocked.filter((lockSite) => {
+    const keysOfItsIdAndRole = [...lockedSitesByKey.keys()].filter(
+      (key) => idAndRoleOfLockKey(key) === idAndRoleOfLockKey(lockSite.key),
+    )
+    return !keysOfItsIdAndRole.some((key) => claimLockLineOf(lockSite, key))
+  })
+  for (const lockSite of sitesNotMoved) {
+    const isOwnKeyFree = lockedSitesByKey.has(lockSite.key) && !claimedKeys.has(lockSite.key)
+    if (isOwnKeyFree) {
+      claimedKeys.add(lockSite.key)
       const message = `${lockSite.label} changed since the last ack: re-read the entry ${lockSite.id}; it still holds → ack ${lockSite.id}; its meaning changed → bump its version`
       problems.push(errorAt(PROBLEM_CODES.changed, lockSite, lockSite.id, message))
+      continue
     }
+    const message = `${lockSite.label} is not in the lock (new, or moved and edited): verify it, then ack ${lockSite.id}`
+    problems.push(errorAt(PROBLEM_CODES.unacked, lockSite, lockSite.id, message))
   }
-  const currentKeys = new Set(sitesInLock.map((lockSite) => lockSite.key))
   for (const [key, lockedSite] of lockedSitesByKey) {
-    if (!currentKeys.has(key)) {
+    if (!claimedKeys.has(key)) {
       const id = idOfLockKey(key)
       const message = `${key} is gone since the last ack: ack ${id} to drop it`
       problems.push(errorAt(PROBLEM_CODES.gone, lockedSite, id, message))

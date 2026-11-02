@@ -549,6 +549,57 @@ describe('lock', () => {
     expect(describeLockProblems(repoRoot)).toEqual([])
   })
 
+  test('a site that moved is not reported: a renamed file, a flow anchor renumbered by one added above it', () => {
+    const roomText = [
+      '// §edge sync.close-during-join@1',
+      'if (closedEarly) {',
+      '  joined.removeConnection(connection)',
+      '}',
+      '',
+    ].join('\n')
+    const repoRoot = createFixtureRepo({
+      'src/room.ts': roomText,
+      'logicmap/sync.md': closeDuringJoinEntry(1),
+    })
+    ackIds(repoRoot, ['sync.close-during-join'])
+
+    renameSync(join(repoRoot, 'src/room.ts'), join(repoRoot, 'src/join-room.ts'))
+    expect(describeLockProblems(repoRoot)).toEqual([])
+
+    writeFixtureFiles(repoRoot, {
+      'src/join-room.ts': roomText.replace('removeConnection', 'dropConnection'),
+    })
+    expect(describeLockProblems(repoRoot)).toEqual([
+      'gone logicmap/sync.lock:2',
+      'unacked src/join-room.ts:1',
+    ])
+
+    const flowEntry = [
+      '## sync.open-document',
+      'kind: flow',
+      'version: 1',
+      'what: Opening a document over the socket.',
+      'why: The steps cross the browser, the upgrade and the room.',
+      'source: fixture',
+      'steps:',
+      '  1. The browser opens the socket.',
+      '  2. The upgrade resolves access.',
+      '',
+    ].join('\n')
+    const stepOneLines = ['// §flow sync.open-document@1 #1', 'const openSocket = () => {}']
+    const stepTwoLines = ['// §flow sync.open-document@1 #2', 'const resolveAccess = () => {}']
+    const flowRepoRoot = createFixtureRepo({
+      'src/open.ts': [...stepOneLines, ...stepTwoLines, ''].join('\n'),
+      'logicmap/sync.md': flowEntry,
+    })
+    ackIds(flowRepoRoot, ['sync.open-document'])
+    const addedStepLines = ['// §flow sync.open-document@1 #1', 'const openSocketAgain = () => {}']
+    writeFixtureFiles(flowRepoRoot, {
+      'src/open.ts': [...addedStepLines, ...stepOneLines, ...stepTwoLines, ''].join('\n'),
+    })
+    expect(describeLockProblems(flowRepoRoot)).toEqual(['unacked src/open.ts:1'])
+  })
+
   test('an anchor written as a JSX comment covers the element below it', () => {
     const appLines = [
       'export const App = () => (',
