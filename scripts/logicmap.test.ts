@@ -1389,6 +1389,38 @@ describe('why', () => {
     )
   })
 
+  test("a merge whose two sides changed the lines is left out; its sides' commits are listed", () => {
+    const roomLines = ['const a = 1', 'const b = 2', 'const c = 3', 'const d = 4', '']
+    const repoRoot = createFixtureRepo({ 'src/room.ts': roomLines.join('\n') })
+    const writeRoom = (): void =>
+      writeFixtureFiles(repoRoot, { 'src/room.ts': roomLines.join('\n') })
+    const runFixtureGit = (gitArguments: string[]): void => {
+      execFileSync(
+        'git',
+        ['-c', 'user.name=fixture', '-c', 'user.email=fixture@example.com', ...gitArguments],
+        {
+          cwd: repoRoot,
+          stdio: 'ignore',
+        },
+      )
+    }
+    commitFixtureRepo(repoRoot, 'wip: the room')
+    runFixtureGit(['checkout', '--quiet', '-b', 'side'])
+    roomLines[1] = 'const b = 20'
+    writeRoom()
+    commitFixtureRepo(repoRoot, 'wip: b on the side')
+    runFixtureGit(['checkout', '--quiet', '-'])
+    roomLines[1] = 'const b = 2'
+    roomLines[3] = 'const d = 40'
+    writeRoom()
+    commitFixtureRepo(repoRoot, 'wip: d on the trunk')
+    runFixtureGit(['merge', '--quiet', '--no-ff', 'side', '-m', 'Merge branch side'])
+
+    const roomWhy = whyLogicMap(repoRoot, 'src/room.ts:1-4')
+    expect(roomWhy).toStartWith('src/room.ts:1-4: 3 commits, newest first')
+    expect(roomWhy).not.toContain('Merge branch side')
+  })
+
   test('a commit that only added or removed blank lines among the lines is left out, and counted', () => {
     const roomLines = [
       'export const joinRoom = () => {',
@@ -1480,6 +1512,50 @@ describe('hook', () => {
       'logicmap/sync.md': closeDuringJoinEntry(2),
     })
     expect(contextOfRead(sessionId)).toContain('sync.close-during-join@2  edge  recorded')
+  })
+
+  test('after a read of committed code, once per file and session, the newest change of the lines and the why command', () => {
+    const repoRoot = createMappedRepo()
+    const roomPath = join(repoRoot, 'src/room.ts')
+    writeFixtureFiles(repoRoot, {
+      'src/other.ts': 'export const other = 1\n',
+      'plans/01-the-join/01-the-edge.md': [
+        '## Piece 1: the join drops a closed socket',
+        'What: the branch.',
+        'Where: `src/room.ts:3-5`',
+        '',
+      ].join('\n'),
+    })
+    commitFixtureRepo(repoRoot, 'wip: the join drops a socket closed meanwhile')
+    writeFixtureFiles(repoRoot, { 'src/plain.ts': 'export const plain = 1\n' })
+    const sessionId = `reading-${crypto.randomUUID()}`
+    const contextOfRead = (readingSessionId: string, toolInput: Record<string, unknown>) => {
+      const hookOutput = respondToHook({
+        hook_event_name: 'PostToolUse',
+        session_id: readingSessionId,
+        tool_name: 'Read',
+        tool_input: toolInput,
+      })
+      return hookOutput !== null && 'hookSpecificOutput' in hookOutput
+        ? hookOutput.hookSpecificOutput.additionalContext
+        : null
+    }
+
+    const firstRead = contextOfRead(sessionId, { file_path: roomPath, offset: 3, limit: 3 })
+    expect(firstRead).toStartWith('logicmap: the rules covering src/room.ts')
+    expect(firstRead).toMatch(
+      /\nlogicmap: last changed by [0-9a-f]{7,} on \d{4}-\d{2}-\d{2}, "wip: the join drops a socket closed meanwhile", recorded as Piece 1 in plans\/01-the-join\/01-the-edge\.md\. logicmap why src\/room\.ts:3-5 gives every commit of these lines with its reason\.$/,
+    )
+    expect(contextOfRead(sessionId, { file_path: roomPath, offset: 3, limit: 3 })).not.toContain(
+      'last changed by',
+    )
+    expect(contextOfRead(`another-${crypto.randomUUID()}`, { file_path: roomPath })).toContain(
+      'logicmap why src/room.ts:<line> or src/room.ts:<name> gives every commit of a line or a declaration with its reason.',
+    )
+    expect(contextOfRead(sessionId, { file_path: join(repoRoot, 'src/other.ts') })).toStartWith(
+      'logicmap: last changed by',
+    )
+    expect(contextOfRead(sessionId, { file_path: join(repoRoot, 'src/plain.ts') })).toBeNull()
   })
 
   test('after an edit, the problems of the rules in that file; nothing when they still match', () => {

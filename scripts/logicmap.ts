@@ -1365,17 +1365,23 @@ const toHeadLines = (repoRoot: string, file: string, lines: LineRange): HeadLine
 
 // Every commit that changed these lines of HEAD, newest first, with the diff git log -L shows for them;
 // null when git can't trace them (lines past the end of the file).
+// maxCount stops git after that many commits: a whole file's history otherwise prints every diff. A merge is
+// left out: git lists one whose two sides changed the lines, its subject names branches, and its sides' commits
+// are listed on their own (a hand-made conflict resolution goes unlisted).
 const listLineCommitsOrNull = (
   repoRoot: string,
   file: string,
   headLines: LineRange,
+  maxCount: number | null,
 ): LineCommit[] | null => {
   try {
     return runGit(repoRoot, [
       'log',
       `-L${headLines.firstLine},${headLines.lastLine}:${file}`,
+      '--no-merges',
       '--format=%x1e%h %ad %s',
       '--date=short',
+      ...(maxCount === null ? [] : [`--max-count=${maxCount}`]),
     ])
       .split(COMMIT_SEPARATOR)
       .slice(1)
@@ -1644,21 +1650,19 @@ const describePiece = (
 }
 
 // Under a commit: the piece recorded with it for these lines, and the goal of its task.
+// The Markdown files a commit wrote outside logicmap/: where its pieces and its plan are.
+const listCommitDocPaths = (repoRoot: string, commit: LineCommit): string[] =>
+  runGitOrEmpty(repoRoot, ['show', '--name-only', '--diff-filter=d', '--format=', commit.hash])
+    .split('\n')
+    .filter((path) => path.endsWith('.md') && !path.startsWith(`${LEDGER_DIRECTORY}/`))
+
 const describeCommitReason = (
   repoRoot: string,
   commit: LineCommit,
   file: string,
   ruleId: string | null,
 ): string[] => {
-  const docPaths = runGitOrEmpty(repoRoot, [
-    'show',
-    '--name-only',
-    '--diff-filter=d',
-    '--format=',
-    commit.hash,
-  ])
-    .split('\n')
-    .filter((path) => path.endsWith('.md') && !path.startsWith(`${LEDGER_DIRECTORY}/`))
+  const docPaths = listCommitDocPaths(repoRoot, commit)
   if (docPaths.length === 0) {
     return []
   }
@@ -1758,7 +1762,7 @@ const describeLinesHistory = (
     }
   }
   const headLinesLabel = describeLineRange(headLines)
-  const commits = listLineCommitsOrNull(repoRoot, file, headLines)
+  const commits = listLineCommitsOrNull(repoRoot, file, headLines, null)
   if (commits === null) {
     const untracedLine = `${linesLabel}: git log -L can't trace HEAD's lines ${headLinesLabel} of ${file}`
     return { summaryLines: [untracedLine], commitLines: [] }
@@ -1796,6 +1800,60 @@ const describeLinesHistory = (
       ]),
       ...olderCommitsNote,
     ],
+  }
+}
+
+// The commits read for the newest change: the newest ones may only have added blank lines.
+const NEWEST_CHANGE_MAX_COMMITS = 5
+
+export type NewestLinesChange = {
+  lines: LineRange
+  date: string
+  hash: string
+  subject: string
+  piece: { docPath: string; label: string } | null
+}
+
+// For the Read hook: the newest commit that changed these lines of the working tree (the whole file when
+// null), past the commits that only added or removed blank lines, and the piece recorded with it. Null when
+// git holds no history of them.
+export const findNewestLinesChange = (
+  repoRoot: string,
+  file: string,
+  requestedLines: LineRange | null,
+): NewestLinesChange | null => {
+  const isHistoryReadable = isFileInHead(repoRoot, file) && existsSync(join(repoRoot, file))
+  if (!isHistoryReadable) {
+    return null
+  }
+  const fileText = readFileSync(join(repoRoot, file), 'utf8')
+  const fileLineCount = fileText.split('\n').length - (fileText.endsWith('\n') ? 1 : 0)
+  const lines = {
+    firstLine: requestedLines?.firstLine ?? 1,
+    lastLine: Math.min(requestedLines?.lastLine ?? fileLineCount, fileLineCount),
+  }
+  if (lines.firstLine > lines.lastLine) {
+    return null
+  }
+  const { headLines } = toHeadLines(repoRoot, file, lines)
+  const commits =
+    headLines === null
+      ? null
+      : listLineCommitsOrNull(repoRoot, file, headLines, NEWEST_CHANGE_MAX_COMMITS)
+  const newestCommit = commits?.find((commit) => !isBlankLinesOnlyCommit(commit))
+  if (newestCommit === undefined) {
+    return null
+  }
+  const docPaths = listCommitDocPaths(repoRoot, newestCommit)
+  const foundPiece =
+    docPaths.length === 0 ? null : findRecordedPiece(repoRoot, newestCommit, file, docPaths, null)
+  return {
+    lines,
+    date: newestCommit.date,
+    hash: newestCommit.hash,
+    subject: newestCommit.subject,
+    piece:
+      foundPiece === null ? null : { docPath: foundPiece.docPath, label: foundPiece.piece.label },
   }
 }
 

@@ -91,9 +91,11 @@ Files: `scripts/logicmap.ts`, `scripts/logicmap.test.ts`
 Files: `scripts/logicmap.ts`, `scripts/logicmap.test.ts`
 
 ### 6. The Read hook names `why`
-- [ ] Measure on teamabled what one line would cost per read (the newest commit's task for the lines read).
-- [ ] Failing test, then the line: once per file per session, after the rules, either that task or only the hint
-  `logicmap why <file>:<lines>`, whichever the measure allows.
+- [x] Measure on teamabled what one line would cost per read (the newest commit's task for the lines read).
+- [x] Failing test, then the line: once per file per session, after the rules, either that task or only the hint
+  `logicmap why <file>:<lines>`, whichever the measure allows (the newest change and its piece: +0.05–0.1 s).
+- [x] Failing test (revision 4): a merge whose two sides changed the lines is not listed; its sides' commits are.
+- [x] `--no-merges` on every `git log -L`.
 Files: `scripts/hook.ts`, `scripts/logicmap.test.ts`
 
 ### 7. The docs
@@ -130,3 +132,8 @@ then a commit on `why`; the installed clone gets `main` by `merge --ff-only` onc
    two days older than the rule, because the entry holds a blank line that `git log -L` traced to a blank line that
    commit added elsewhere. A commit whose change among the traced lines is only blank lines explains nothing; step 5
    leaves such commits out of the list, for lines and rules alike, and counts them on the first line.
+4. 2026-11-02, step 6, found by the agent on teamabled: a whole-file Read of `DocumentEditorPage.tsx` named
+   `29af14ce`, "Merge branch 'feat/e2e-approvals' into feat/backend-review-rest". `git log -L` lists a merge whose
+   two sides both changed the range (probed: a line changed on each side of a merge lists the merge first), and a
+   merge's subject names branches, not a reason; its sides' commits are listed on their own. Step 6 adds
+   `--no-merges` to the `-L` call, for `why` and the hook alike.

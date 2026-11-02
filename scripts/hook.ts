@@ -5,10 +5,12 @@ import { dirname, join, relative, sep } from 'node:path'
 import {
   LEDGER_DIRECTORY,
   type LineRange,
+  type NewestLinesChange,
   PROBLEM_SEVERITIES,
   type Problem,
   type RuleSection,
   checkRepo,
+  findNewestLinesChange,
   formatProblem,
   listRuleSectionsInLines,
 } from './logicmap.ts'
@@ -17,7 +19,9 @@ import {
  * Claude Code hook: puts the map in front of the agent while it reads and edits mapped code.
  *
  *   PostToolUse Read                      → the rules covering the lines just read, in full the first
- *                                           time a session reads them, then by id
+ *                                           time a session reads them, then by id; and, the first time
+ *                                           it reads a committed code file, the newest change of the
+ *                                           lines read and the logicmap why command
  *   PostToolUse Edit / MultiEdit / Write  → what check reports for the edited file's rules
  *   Stop                                  → check's errors, once, so the agent resolves them or says
  *                                           why they stay; only for a session that edited the repo
@@ -75,6 +79,8 @@ const sessionFileOf = (sessionId: string, fileSuffix: string): string =>
   join(SESSION_FILES_DIRECTORY, `${sessionId.replace(/[^\w-]/g, '_')}${fileSuffix}`)
 const editedReposFileOf = (sessionId: string): string => sessionFileOf(sessionId, '.txt')
 const shownRulesFileOf = (sessionId: string): string => sessionFileOf(sessionId, '.shown-rules.txt')
+const namedChangesFileOf = (sessionId: string): string =>
+  sessionFileOf(sessionId, '.named-changes.txt')
 
 const appendToSessionFile = (sessionFile: string, lines: string[]): void => {
   mkdirSync(SESSION_FILES_DIRECTORY, { recursive: true })
@@ -126,6 +132,60 @@ const readShownRuleLines = (sessionId: string): Set<string> => {
     : new Set()
 }
 
+// A commit subject is cut here: teamabled's run to 300 characters.
+const NAMED_SUBJECT_MAX_LENGTH = 100
+
+const describeNewestChange = (
+  file: string,
+  { lines, date, hash, subject }: NewestLinesChange,
+  pieceText: string,
+  isWholeFileRead: boolean,
+): string => {
+  const shownSubject =
+    subject.length > NAMED_SUBJECT_MAX_LENGTH
+      ? `${subject.slice(0, NAMED_SUBJECT_MAX_LENGTH)}…`
+      : subject
+  const whyCommand = isWholeFileRead
+    ? `logicmap why ${file}:<line> or ${file}:<name> gives every commit of a line or a declaration with its reason.`
+    : `logicmap why ${file}:${lines.firstLine}-${lines.lastLine} gives every commit of these lines with its reason.`
+  return `logicmap: last changed by ${hash} on ${date}, "${shownSubject}"${pieceText}. ${whyCommand}`
+}
+
+// The newest change of the lines read, once per file and session, for a code file git holds: a Markdown file
+// is where reasons are written, and logicmap/ has why <id>. A failing git call costs this line only, never
+// the rules.
+const listNewestChangeLines = (
+  repoRoot: string,
+  file: string,
+  readLines: LineRange | null,
+  sessionId: string | null,
+): string[] => {
+  const isCodeFile = !file.endsWith('.md') && !file.startsWith(`${LEDGER_DIRECTORY}/`)
+  const namedChangeLine = `${repoRoot} ${file}`
+  const namedChangesFile = sessionId === null ? null : namedChangesFileOf(sessionId)
+  const isNamedBefore =
+    namedChangesFile !== null &&
+    existsSync(namedChangesFile) &&
+    readFileSync(namedChangesFile, 'utf8').split('\n').includes(namedChangeLine)
+  if (!isCodeFile || isNamedBefore) {
+    return []
+  }
+  try {
+    const newestChange = findNewestLinesChange(repoRoot, file, readLines)
+    if (newestChange === null) {
+      return []
+    }
+    if (namedChangesFile !== null) {
+      appendToSessionFile(namedChangesFile, [namedChangeLine])
+    }
+    const { piece } = newestChange
+    const pieceText = piece === null ? '' : `, recorded as ${piece.label} in ${piece.docPath}`
+    return [describeNewestChange(file, newestChange, pieceText, readLines === null)]
+  } catch {
+    return []
+  }
+}
+
 // Each rule in full the first time this session reads its lines, then by id in one line, so the agent
 // still sees which rules cover what it reads after its context was compacted. Without a session id (an
 // older Claude Code), every read shows them in full.
@@ -140,8 +200,10 @@ const respondToRead = (
     return null
   }
   const file = toRepoPath(repoRoot, filePath)
-  const ruleSections = listRuleSectionsInLines(repoRoot, file, toReadLines(offset, limit))
-  if (ruleSections.length === 0) {
+  const readLines = toReadLines(offset, limit)
+  const ruleSections = listRuleSectionsInLines(repoRoot, file, readLines)
+  const newestChangeLines = listNewestChangeLines(repoRoot, file, readLines, sessionId)
+  if (ruleSections.length === 0 && newestChangeLines.length === 0) {
     return null
   }
   const shownRuleLines = sessionId === null ? new Set<string>() : readShownRuleLines(sessionId)
@@ -170,7 +232,7 @@ const respondToRead = (
           `logicmap: the rules covering ${file} (logicmap show <id> for the full entry):`,
           ...newRuleSections.map((ruleSection) => ruleSection.text),
         ]
-  return addContext([...newRulesLines, ...shownBeforeLines].join('\n'))
+  return addContext([...newRulesLines, ...shownBeforeLines, ...newestChangeLines].join('\n'))
 }
 
 // A problem belongs to the edited file when it sits there, or when a lock line of that file is gone.
