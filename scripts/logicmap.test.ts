@@ -1282,6 +1282,51 @@ describe('why', () => {
     expect(whyLogicMap(repoRoot, 'src/room.ts:6')).not.toContain('sync.close-during-join')
   })
 
+  test("a rule's rejected alternatives are printed under its why, in a line's why and in the rule's", () => {
+    const repoRoot = createFixtureRepo({
+      'src/room.ts': [
+        'export const joinSocket = () => {',
+        '  // §edge sync.close-during-join@1',
+        '  if (closedEarly) {',
+        '    joined.removeConnection(connection)',
+        '  }',
+        '  // §edge sync.pooled-buffer-slice@1',
+        '  decode(message)',
+        '}',
+        '',
+      ].join('\n'),
+      'logicmap/sync.md': [
+        '# sync',
+        '',
+        closeDuringJoinEntry(1).replace(
+          'source: fixture',
+          'rejected: removing the connection in the close handler → the join adds it back after.\nsource: fixture',
+        ),
+        pooledBufferSliceEntry,
+      ].join('\n'),
+    })
+    ackIds(repoRoot, ['sync.close-during-join', 'sync.pooled-buffer-slice'])
+    commitFixtureRepo(repoRoot, 'wip: the join')
+    const whyAndRejectedLines = [
+      '  why: The join adds the connection before it resolves.',
+      '  rejected: removing the connection in the close handler → the join adds it back after.',
+    ].join('\n')
+
+    expect(whyLogicMap(repoRoot, 'src/room.ts:4')).toContain(
+      [
+        'sync.close-during-join@1  edge  recorded  The socket can close while the join is loading.',
+        whyAndRejectedLines,
+        '  2-5  §edge  ok',
+      ].join('\n'),
+    )
+    expect(whyLogicMap(repoRoot, 'sync.close-during-join')).toContain(
+      `The socket can close while the join is loading.\n${whyAndRejectedLines}\n`,
+    )
+    expect(whyLogicMap(repoRoot, 'src/room.ts:7')).toContain(
+      '  why: The decoder must read exactly this message.\n  6-7  §edge  ok',
+    )
+  })
+
   test("a declaration's why: its lines in the file as it is now, up to the next declaration's comment", () => {
     const roomLines = [
       'export const joinRoom = () => {',

@@ -100,6 +100,7 @@ export type LedgerEntry = {
   what: string
   claim: string
   why: string
+  rejected: string
   // Why no test proves it, when someone wrote so; such an entry raises no untested warning.
   untestedReason: string
   steps: FlowStep[]
@@ -387,6 +388,7 @@ const parseEntry = (entryBlock: EntryBlock): { entry: LedgerEntry; problems: Pro
       what,
       claim,
       why: fieldByName.get('why')?.text ?? '',
+      rejected: fieldByName.get('rejected')?.text ?? '',
       untestedReason: fieldByName.get('untested')?.text ?? '',
       steps,
       text,
@@ -1678,6 +1680,12 @@ const describeCommitReason = (
   return [...pieceLines, ...goalLines].map((reasonLine) => `  ${reasonLine}`)
 }
 
+// A rule's why and the alternatives it rejected: what must hold now, and what not to bring back.
+const describeWhyAndRejected = (entry: LedgerEntry | undefined): string[] => [
+  ...(entry === undefined || entry.why === '' ? [] : [`  why: ${entry.why}`]),
+  ...(entry === undefined || entry.rejected === '' ? [] : [`  rejected: ${entry.rejected}`]),
+]
+
 // The rules covering these lines as show <file> prints them, each with its why: what must hold now.
 const listRulesWithTheirWhy = (repoRoot: string, file: string, lines: LineRange): string[] => {
   const views = createShowViews(repoRoot)
@@ -1686,8 +1694,8 @@ const listRulesWithTheirWhy = (repoRoot: string, file: string, lines: LineRange)
   }
   return views.listFileRuleSections(file, lines).flatMap((ruleSection) => {
     const [ruleLine = '', ...siteLines] = ruleSection.text.split('\n')
-    const why = views.analysis.entriesById.get(ruleSection.id)?.why ?? ''
-    return [ruleLine, ...(why === '' ? [] : [`  why: ${why}`]), ...siteLines]
+    const entry = views.analysis.entriesById.get(ruleSection.id)
+    return [ruleLine, ...describeWhyAndRejected(entry), ...siteLines]
   })
 }
 
@@ -1910,7 +1918,7 @@ const explainRule = (repoRoot: string, entry: LedgerEntry): string => {
   )
   return [
     ruleLine,
-    `  why: ${entry.why}`,
+    ...describeWhyAndRejected(entry),
     ...historyLines.map((historyLine) => `  ${historyLine}`),
     '',
     ...summaryLines,
