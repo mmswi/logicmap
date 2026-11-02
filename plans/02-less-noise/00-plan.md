@@ -90,9 +90,9 @@ Files: `scripts/logicmap.ts`, `scripts/logicmap.test.ts`
 Files: `scripts/logicmap.ts`, `scripts/logicmap.test.ts`
 
 ### 6. The hook shows a rule once per session
-- [ ] Failing test: a second read in the same session lists a rule shown before by id in one line; a
+- [x] Failing test: a second read in the same session lists a rule shown before by id in one line; a
   rule bumped since is shown in full; another session sees it in full.
-- [ ] The rules shown per session in the hook's per-session directory; the views split per rule.
+- [x] The rules shown per session in the hook's per-session directory; the views split per rule.
 Files: `scripts/hook.ts`, `scripts/logicmap.ts`, `scripts/logicmap.test.ts`
 
 ### 7. `logicmap diff <id>`

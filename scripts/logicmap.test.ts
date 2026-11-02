@@ -1052,6 +1052,37 @@ describe('hook', () => {
     expect(readOf({ file_path: roomPath, offset: 6, limit: 2 })).toBeNull()
   })
 
+  test('a session sees a rule in full once; read again, it is named in one line; bumped, it is in full again', () => {
+    const repoRoot = createMappedRepo()
+    const roomPath = join(repoRoot, 'src/room.ts')
+    const sessionId = `reading-${crypto.randomUUID()}`
+    const contextOfRead = (readingSessionId: string): string =>
+      JSON.stringify(
+        respondToHook({
+          hook_event_name: 'PostToolUse',
+          session_id: readingSessionId,
+          tool_name: 'Read',
+          tool_input: { file_path: roomPath },
+        }),
+      )
+    const fullRuleText = 'sync.close-during-join@1  edge  recorded  The socket can close'
+
+    expect(contextOfRead(sessionId)).toContain(fullRuleText)
+    const secondReadContext = contextOfRead(sessionId)
+    expect(secondReadContext).not.toContain(fullRuleText)
+    expect(secondReadContext).toContain(
+      'rules shown earlier this session: sync.close-during-join@1',
+    )
+    expect(contextOfRead(`another-${crypto.randomUUID()}`)).toContain(fullRuleText)
+
+    const roomText = readFixtureFile(repoRoot, 'src/room.ts')
+    writeFixtureFiles(repoRoot, {
+      'src/room.ts': roomText.replace('close-during-join@1', 'close-during-join@2'),
+      'logicmap/sync.md': closeDuringJoinEntry(2),
+    })
+    expect(contextOfRead(sessionId)).toContain('sync.close-during-join@2  edge  recorded')
+  })
+
   test('after an edit, the problems of the rules in that file; nothing when they still match', () => {
     const repoRoot = createMappedRepo()
     const roomPath = join(repoRoot, 'src/room.ts')

@@ -7,15 +7,17 @@ import {
   type LineRange,
   PROBLEM_SEVERITIES,
   type Problem,
+  type RuleSection,
   checkRepo,
   formatProblem,
-  showRulesInLines,
+  listRuleSectionsInLines,
 } from './logicmap.ts'
 
 /*
  * Claude Code hook: puts the map in front of the agent while it reads and edits mapped code.
  *
- *   PostToolUse Read                      → the rules covering the lines just read
+ *   PostToolUse Read                      → the rules covering the lines just read, in full the first
+ *                                           time a session reads them, then by id
  *   PostToolUse Edit / MultiEdit / Write  → what check reports for the edited file's rules
  *   Stop                                  → check's errors, once, so the agent resolves them or says
  *                                           why they stay; only for a session that edited the repo
@@ -65,17 +67,23 @@ const findMappedRepoRoot = (directory: string): string | null => {
   }
 }
 
-// git prints the repo root with symlinks resolved (macOS: /var → /private/var), so the path is too.
-// The mapped repos each session edited since its last stop, one file per session, so a stop asks only
-// the sessions that changed something: another session's work in progress stops nobody else.
-const EDITED_REPOS_DIRECTORY = join(tmpdir(), 'logicmap-hook')
-const editedReposFileOf = (sessionId: string): string =>
-  join(EDITED_REPOS_DIRECTORY, `${sessionId.replace(/[^\w-]/g, '_')}.txt`)
+// What the hook keeps per session, one file each: the mapped repos it edited since its last stop, so a
+// stop asks only the sessions that changed something (another session's work in progress stops nobody
+// else), and the rules it was shown in full.
+const SESSION_FILES_DIRECTORY = join(tmpdir(), 'logicmap-hook')
+const sessionFileOf = (sessionId: string, fileSuffix: string): string =>
+  join(SESSION_FILES_DIRECTORY, `${sessionId.replace(/[^\w-]/g, '_')}${fileSuffix}`)
+const editedReposFileOf = (sessionId: string): string => sessionFileOf(sessionId, '.txt')
+const shownRulesFileOf = (sessionId: string): string => sessionFileOf(sessionId, '.shown-rules.txt')
 
-const recordEditedRepo = (sessionId: string, repoRoot: string): void => {
-  mkdirSync(EDITED_REPOS_DIRECTORY, { recursive: true })
-  appendFileSync(editedReposFileOf(sessionId), `${repoRoot}\n`)
+const appendToSessionFile = (sessionFile: string, lines: string[]): void => {
+  mkdirSync(SESSION_FILES_DIRECTORY, { recursive: true })
+  appendFileSync(sessionFile, lines.map((line) => `${line}\n`).join(''))
 }
+
+// git prints the repo root with symlinks resolved (macOS: /var → /private/var), so the path is too.
+const recordEditedRepo = (sessionId: string, repoRoot: string): void =>
+  appendToSessionFile(editedReposFileOf(sessionId), [repoRoot])
 
 // Read once: the next stop asks again only after another edit.
 const takeEditedRepos = (sessionId: string): Set<string> => {
@@ -107,22 +115,62 @@ const toReadLines = (offset: unknown, limit: unknown): LineRange | null => {
   return { firstLine, lastLine }
 }
 
-const respondToRead = (filePath: string, offset: unknown, limit: unknown): HookOutput | null => {
+// A rule is shown once per version: bumped, its new claim is shown again.
+const shownRuleLineOf = (repoRoot: string, ruleSection: RuleSection): string =>
+  `${repoRoot} ${ruleSection.id}@${ruleSection.version ?? '?'}`
+
+const readShownRuleLines = (sessionId: string): Set<string> => {
+  const shownRulesFile = shownRulesFileOf(sessionId)
+  return existsSync(shownRulesFile)
+    ? new Set(readFileSync(shownRulesFile, 'utf8').split('\n').filter(Boolean))
+    : new Set()
+}
+
+// Each rule in full the first time this session reads its lines, then by id in one line, so the agent
+// still sees which rules cover what it reads after its context was compacted. Without a session id (an
+// older Claude Code), every read shows them in full.
+const respondToRead = (
+  filePath: string,
+  offset: unknown,
+  limit: unknown,
+  sessionId: string | null,
+): HookOutput | null => {
   const repoRoot = findMappedRepoRoot(dirname(filePath))
   if (repoRoot === null) {
     return null
   }
   const file = toRepoPath(repoRoot, filePath)
-  const rulesView = showRulesInLines(repoRoot, file, toReadLines(offset, limit))
-  if (rulesView === null) {
+  const ruleSections = listRuleSectionsInLines(repoRoot, file, toReadLines(offset, limit))
+  if (ruleSections.length === 0) {
     return null
   }
-  return addContext(
-    [
-      `logicmap: the rules covering ${file} (logicmap show <id> for the full entry):`,
-      rulesView,
-    ].join('\n'),
-  )
+  const shownRuleLines = sessionId === null ? new Set<string>() : readShownRuleLines(sessionId)
+  const isShownBefore = (ruleSection: RuleSection): boolean =>
+    shownRuleLines.has(shownRuleLineOf(repoRoot, ruleSection))
+  const newRuleSections = ruleSections.filter((ruleSection) => !isShownBefore(ruleSection))
+  const shownBeforeRuleNames = ruleSections
+    .filter(isShownBefore)
+    .map((ruleSection) => `${ruleSection.id}@${ruleSection.version ?? '?'}`)
+  if (sessionId !== null) {
+    const newShownRuleLines = newRuleSections.map((ruleSection) =>
+      shownRuleLineOf(repoRoot, ruleSection),
+    )
+    appendToSessionFile(shownRulesFileOf(sessionId), newShownRuleLines)
+  }
+  const shownBeforeLines =
+    shownBeforeRuleNames.length === 0
+      ? []
+      : [
+          `logicmap: these lines of ${file} are covered too by rules shown earlier this session: ${shownBeforeRuleNames.join(', ')}`,
+        ]
+  const newRulesLines =
+    newRuleSections.length === 0
+      ? []
+      : [
+          `logicmap: the rules covering ${file} (logicmap show <id> for the full entry):`,
+          ...newRuleSections.map((ruleSection) => ruleSection.text),
+        ]
+  return addContext([...newRulesLines, ...shownBeforeLines].join('\n'))
 }
 
 // A problem belongs to the edited file when it sits there, or when a lock line of that file is gone.
@@ -193,7 +241,12 @@ export const respondToHook = (input: HookInput): HookOutput | null => {
   const isPostToolUse = input.hook_event_name === HOOK_EVENTS.postToolUse
   if (isPostToolUse && typeof filePath === 'string') {
     if (input.tool_name === READ_TOOL_NAME) {
-      return respondToRead(filePath, input.tool_input?.offset, input.tool_input?.limit)
+      return respondToRead(
+        filePath,
+        input.tool_input?.offset,
+        input.tool_input?.limit,
+        input.session_id ?? null,
+      )
     }
     if (EDITING_TOOL_NAMES.includes(input.tool_name ?? '')) {
       return respondToEdit(filePath, input.session_id ?? null)

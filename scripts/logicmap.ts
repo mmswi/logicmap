@@ -999,6 +999,9 @@ const statusOf = (placeProblems: Problem[]): string =>
 // Lines of one file, both ends included, numbered from 1.
 export type LineRange = { firstLine: number; lastLine: number }
 
+// One rule in a file's view: its claim and the lines each of its sites there covers.
+export type RuleSection = { id: string; version: number | null; text: string }
+
 const describeLineRange = ({ firstLine, lastLine }: LineRange): string =>
   firstLine === lastLine ? `${firstLine}` : `${firstLine}-${lastLine}`
 
@@ -1041,14 +1044,14 @@ const createShowViews = (repoRoot: string) => {
     `${anchor.file}:${describeLineRange(coveredLinesOf(anchor))}  ${describeAnchor(anchor)}  ${siteStatusOf(anchor)}`
 
   // Each rule once, in the order its first site appears, with every site in the requested lines under it.
-  const showFileRules = (file: string, requestedLines: LineRange | null): string => {
+  const listFileRuleSections = (file: string, requestedLines: LineRange | null): RuleSection[] => {
     const fileAnchors = analysis.anchors.filter((anchor) => anchor.file === file)
     const shownAnchors =
       requestedLines === null
         ? fileAnchors
         : fileAnchors.filter((anchor) => doLineRangesMeet(coveredLinesOf(anchor), requestedLines))
     const anchorsById = Map.groupBy(shownAnchors, (anchor) => anchor.id)
-    const ruleSections = [...anchorsById].map(([id, ruleAnchors]) => {
+    return [...anchorsById].map(([id, ruleAnchors]) => {
       const entry = analysis.entriesById.get(id)
       const ruleLine =
         entry === undefined
@@ -1058,10 +1061,13 @@ const createShowViews = (repoRoot: string) => {
         const stepNote = anchor.step === null ? '' : ` #${anchor.step}`
         return `  ${describeLineRange(coveredLinesOf(anchor))}  §${anchor.role}${stepNote}  ${siteStatusOf(anchor)}`
       })
-      return [ruleLine, ...siteLines].join('\n')
+      return { id, version: entry?.version ?? null, text: [ruleLine, ...siteLines].join('\n') }
     })
-    return ruleSections.join('\n')
   }
+  const showFileRules = (file: string, requestedLines: LineRange | null): string =>
+    listFileRuleSections(file, requestedLines)
+      .map((ruleSection) => ruleSection.text)
+      .join('\n')
 
   const isAnchoredFile = (file: string): boolean =>
     analysis.anchors.some((anchor) => anchor.file === file)
@@ -1141,6 +1147,7 @@ const createShowViews = (repoRoot: string) => {
     showOneDomain,
     showOneId,
     showFileRules,
+    listFileRuleSections,
     isAnchoredFile,
     isKnownId,
     describeUnanchoredFile,
@@ -1179,19 +1186,15 @@ export const showLogicMap = (repoRoot: string, target: string | undefined): stri
   return `nothing named "${target}": not a domain or an id in ${LEDGER_DIRECTORY}/, not a file with anchors`
 }
 
-// The rules covering some lines of a file (all of it when lines is null), or null when none does: what
-// the hook adds after a read.
-export const showRulesInLines = (
+// The rules covering some lines of a file (all of it when lines is null), each as show <file> prints it:
+// what the hook adds after a read.
+export const listRuleSectionsInLines = (
   repoRoot: string,
   file: string,
   lines: LineRange | null,
-): string | null => {
+): RuleSection[] => {
   const views = createShowViews(repoRoot)
-  if (!views.isAnchoredFile(file)) {
-    return null
-  }
-  const rulesView = views.showFileRules(file, lines)
-  return rulesView === '' ? null : rulesView
+  return views.isAnchoredFile(file) ? views.listFileRuleSections(file, lines) : []
 }
 
 // ---------- Command line ----------
