@@ -596,7 +596,10 @@ type LockSite = {
   isInLock: boolean
   id: string
   version: number
+  // The code's fingerprint, or the entry's.
   fingerprint: string
+  // The code's shape, tokenized the first time it's asked for; null for an entry.
+  readShape: (() => string) | null
   // As lock lines written before comments left the code fingerprint hold it; an entry's is its fingerprint.
   fingerprintWithComments: string
   file: string
@@ -690,10 +693,22 @@ const dropCommentLines = (lines: string[]): string[] => {
 }
 
 // Rewording a comment in the block changes nothing either.
-const fingerprintCode = (lines: string[]): string => {
-  const codeLines = dropCommentLines(lines)
-  return `${CODE_FINGERPRINT_PREFIX}${fingerprintLines(codeLines)}${SHAPE_SEPARATOR}${shapeOfLines(codeLines)}`
+const fingerprintCode = (lines: string[]): string => fingerprintLines(dropCommentLines(lines))
+
+// A check where every site is as locked asks for no shape.
+const createShapeReader = (lines: string[]): (() => string) => {
+  let shape: string | null = null
+  return () => {
+    shape ??= shapeOfLines(dropCommentLines(lines))
+    return shape
+  }
 }
+
+// What a lock line holds for a site: an entry's fingerprint, or a code site's "v3:<code>.<shape>".
+const lockTokenOf = (lockSite: LockSite): string =>
+  lockSite.readShape === null
+    ? lockSite.fingerprint
+    : `${CODE_FINGERPRINT_PREFIX}${lockSite.fingerprint}${SHAPE_SEPARATOR}${lockSite.readShape()}`
 
 const codePartOf = (codeToken: string): string =>
   codeToken.slice(CODE_FINGERPRINT_PREFIX.length).split(SHAPE_SEPARATOR)[0] ?? ''
@@ -803,6 +818,7 @@ const collectLockSites = (
       id: anchor.id,
       version: anchor.version,
       fingerprint: fingerprintCode(anchoredLines),
+      readShape: createShapeReader(anchoredLines),
       fingerprintWithComments: fingerprintLines(anchoredLines),
       file: anchor.file,
       line: anchor.line,
@@ -818,6 +834,7 @@ const collectLockSites = (
       id: entry.id,
       version: entry.version ?? 0,
       fingerprint: entryFingerprint,
+      readShape: null,
       fingerprintWithComments: entryFingerprint,
       file: entry.file,
       line: entry.line,
@@ -882,10 +899,10 @@ const isAsLocked = (lockSite: LockSite, lockedSite: LockedSite): boolean => {
   const isLockedWithShape = lockedFingerprint.startsWith(CODE_FINGERPRINT_PREFIX)
   const isLockedBeforeShapes = lockedFingerprint.startsWith(CODE_FINGERPRINT_PREFIX_BEFORE_SHAPES)
   const isSameCode = isLockedWithShape
-    ? codePartOf(lockedFingerprint) === codePartOf(lockSite.fingerprint)
+    ? codePartOf(lockedFingerprint) === lockSite.fingerprint
     : isLockedBeforeShapes
       ? lockedFingerprint.slice(CODE_FINGERPRINT_PREFIX_BEFORE_SHAPES.length) ===
-        codePartOf(lockSite.fingerprint)
+        lockSite.fingerprint
       : lockedFingerprint === lockSite.fingerprintWithComments
   return lockedSite.version === lockSite.version && isSameCode
 }
@@ -894,7 +911,8 @@ const isAsLocked = (lockSite: LockSite, lockedSite: LockedSite): boolean => {
 const isRenamedSinceLocked = (lockSite: LockSite, lockedSite: LockedSite): boolean =>
   lockedSite.fingerprint.startsWith(CODE_FINGERPRINT_PREFIX) &&
   lockedSite.version === lockSite.version &&
-  shapePartOf(lockedSite.fingerprint) === shapePartOf(lockSite.fingerprint)
+  lockSite.readShape !== null &&
+  shapePartOf(lockedSite.fingerprint) === lockSite.readShape()
 
 // "<id> <role>": a site moved to another file, or renumbered in its own, keeps them.
 const idAndRoleOfLockKey = (key: string): string => key.split(' ').slice(0, 2).join(' ')
@@ -1201,12 +1219,12 @@ export const ackIds = (
     .map(([key, lockedSite]) => {
       const lockSite = sitesInLockByKey.get(key)
       const isUnchanged = lockSite !== undefined && isAsLocked(lockSite, lockedSite)
-      const fingerprint = isUnchanged ? lockSite.fingerprint : lockedSite.fingerprint
+      const fingerprint = isUnchanged ? lockTokenOf(lockSite) : lockedSite.fingerprint
       return `${key} ${lockedSite.version} ${fingerprint}`
     })
   const ackedLockLines = lockSites
     .filter((lockSite) => lockSite.isInLock && requestedIds.has(lockSite.id))
-    .map((lockSite) => `${lockSite.key} ${lockSite.version} ${lockSite.fingerprint}`)
+    .map((lockSite) => `${lockSite.key} ${lockSite.version} ${lockTokenOf(lockSite)}`)
   const lockLines = [...keptLockLines, ...ackedLockLines].sort()
   // A lock line starts with its key, and a key with its id.
   const lockLinesByFile = Map.groupBy(lockLines, (lockLine) => lockFileOf(idOfLockKey(lockLine)))
@@ -1572,8 +1590,7 @@ const createRenamesReader = (repoRoot: string): RenamesReader => {
       return null
     }
     const ackedLines = anchoredLinesAt(fileLines, anchorLineIndex)
-    const isTheAckedCode =
-      codePartOf(fingerprintCode(ackedLines)) === codePartOf(lockedSite.fingerprint)
+    const isTheAckedCode = fingerprintCode(ackedLines) === codePartOf(lockedSite.fingerprint)
     return isTheAckedCode ? ackedLines : null
   }
   return (lockSite, lockedKey, lockedSite) => {
