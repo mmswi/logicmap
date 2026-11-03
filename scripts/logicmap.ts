@@ -719,7 +719,6 @@ const shapePartOf = (codeToken: string): string =>
 const COMMENT_LINE_PATTERN = /^\s*(\/\/|\/\*|\*|#|--|<!--|\{\/\*)/
 const DECORATOR_LINE_PATTERN = /^\s*@/
 const CLOSING_BRACKET_LINE_PATTERN = /^\s*[)\]}]/
-const OPENS_BLOCK_PATTERN = /[{([]\s*$/
 
 const indentOf = (line: string): number => line.length - line.trimStart().length
 const isBlankLine = (line: string): boolean => line.trim() === ''
@@ -731,7 +730,7 @@ const isBlankLine = (line: string): boolean => line.trim() === ''
  *          otherwise the first code line below the comment, through any decorators
  *   block: every following line indented deeper than the head,
  *          plus closing-bracket lines at the head's indentation  `}`  `)`  `} else {`
- *          (a closing line that opens a new block keeps the block going)
+ *          (after a closing line, a deeper line continues the statement: `}): T =>` and its body)
  */
 type AnchoredLineRange = { headLineIndex: number; lastLineIndex: number }
 
@@ -781,9 +780,6 @@ const findAnchoredLineRange = (
       break
     }
     lastLineIndex = lineIndex
-    if (!OPENS_BLOCK_PATTERN.test(line)) {
-      break
-    }
   }
   return { headLineIndex, lastLineIndex }
 }

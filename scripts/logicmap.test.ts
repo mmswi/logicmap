@@ -394,6 +394,45 @@ describe('lock', () => {
     expect(describeLockProblems(repoRoot)).toEqual(['changed src/room.ts:2'])
   })
 
+  test('a statement continued past its closing line stays covered: an arrow body after }): T =>, a chained call', () => {
+    const liveLines = [
+      '// §edge sync.close-during-join@1',
+      'export const signalDeleted = (input: {',
+      '  teamId: string',
+      '}): void =>',
+      '  pushToUsers(input.teamId)',
+      '',
+      '// §edge sync.pooled-buffer-slice@1',
+      'loadRoom({',
+      '  id,',
+      '})',
+      '  .then(joinRoom)',
+      'flushPending()',
+      '',
+    ]
+    const repoRoot = createFixtureRepo({
+      'src/live.ts': liveLines.join('\n'),
+      'logicmap/sync.md': `${closeDuringJoinEntry(1)}\n${pooledBufferSliceEntry}`,
+    })
+    ackIds(repoRoot, ['sync.close-during-join', 'sync.pooled-buffer-slice'])
+    const replaceLiveLine = (lineIndex: number, replacementLine: string): void => {
+      liveLines[lineIndex] = replacementLine
+      writeFixtureFiles(repoRoot, { 'src/live.ts': liveLines.join('\n') })
+    }
+
+    replaceLiveLine(11, 'flushPendingMessages()')
+    expect(describeLockProblems(repoRoot)).toEqual([])
+
+    replaceLiveLine(4, '  pushToUsers(input.teamId, true)')
+    expect(describeLockProblems(repoRoot)).toEqual(['changed src/live.ts:1'])
+
+    replaceLiveLine(10, '  .then(leaveRoom, true)')
+    expect(describeLockProblems(repoRoot)).toEqual([
+      'changed src/live.ts:1',
+      'changed src/live.ts:7',
+    ])
+  })
+
   test('a trailing anchor covers its own line; an edited entry is changed; a deleted anchor is gone', () => {
     const anchoredLine =
       'const undoJoin = () => joined.removeConnection(connection) // §edge sync.close-during-join@1'
