@@ -63,6 +63,9 @@ export const PROBLEM_CODES = {
   changed: 'changed',
   renamed: 'renamed',
   gone: 'gone',
+  unanchoredMatch: 'unanchored-match',
+  grepMismatch: 'grep-mismatch',
+  grepUnavailable: 'grep-unavailable',
   unknownId: 'unknown-id',
   untested: 'untested',
   longWhat: 'long-what',
@@ -105,8 +108,12 @@ export type LedgerEntry = {
   // Why no test proves it, when someone wrote so; such an entry raises no untested warning.
   untestedReason: string
   steps: FlowStep[]
+  // What the rule's code sends or reads (a message type, a mirrored key): every line it finds is a site.
+  grepPattern: GrepPattern | null
   text: string
 }
+
+type GrepPattern = { source: string; pattern: RegExp; line: number }
 
 export const LEDGER_DIRECTORY = 'logicmap'
 const LEDGER_FILE_EXTENSION = '.md'
@@ -160,19 +167,25 @@ const readIgnoredPathspecs = (repoRoot: string): string[] => {
 
 // Every line holding a `§`: tracked and untracked files, binary files skipped, the ledger and the
 // ignored paths excluded.
-const grepLinesWithSigil = (repoRoot: string): string[] => {
+// The lines these patterns find in the files anchors are read from; a run that finds none gives none.
+const grepRepoLines = (repoRoot: string, patternArguments: string[]): string[] => {
   const excludedPathspecs = [`${LEDGER_DIRECTORY}/`, ...readIgnoredPathspecs(repoRoot)].map(
     (pathspec) => `:(exclude)${pathspec}`,
   )
   try {
     const grepOutput = execFileSync(
       'git',
-      ['grep', '-n', '-I', '--untracked', '-e', '§', '--', '.', ...excludedPathspecs],
-      { cwd: repoRoot, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 },
+      ['grep', '-n', '-I', '--untracked', ...patternArguments, '--', '.', ...excludedPathspecs],
+      {
+        cwd: repoRoot,
+        encoding: 'utf8',
+        maxBuffer: 64 * 1024 * 1024,
+        stdio: ['ignore', 'pipe', 'pipe'],
+      },
     )
     return grepOutput.split('\n').filter((grepLine) => grepLine !== '')
   } catch (error: unknown) {
-    // git grep exits 1 when nothing matches: a repo with no anchors yet.
+    // git grep exits 1 when nothing matches.
     const isNoMatchExit = error instanceof Error && 'status' in error && error.status === 1
     if (isNoMatchExit) {
       return []
@@ -180,6 +193,8 @@ const grepLinesWithSigil = (repoRoot: string): string[] => {
     throw error
   }
 }
+
+const grepLinesWithSigil = (repoRoot: string): string[] => grepRepoLines(repoRoot, ['-e', '§'])
 
 const scanAnchors = (repoRoot: string): { anchors: Anchor[]; problems: Problem[] } => {
   const anchors: Anchor[] = []
@@ -227,6 +242,7 @@ const ENTRY_FIELD_NAMES = [
   'untested',
   'source',
   'steps',
+  'grep',
   'history',
 ] as const
 type EntryFieldName = (typeof ENTRY_FIELD_NAMES)[number]
@@ -304,6 +320,14 @@ const readEntryFields = (
   return { fieldByName, steps }
 }
 
+const readGrepPattern = (grepField: EntryField): GrepPattern | null => {
+  try {
+    return { source: grepField.text, pattern: new RegExp(grepField.text), line: grepField.line }
+  } catch {
+    return null
+  }
+}
+
 const parseEntry = (entryBlock: EntryBlock): { entry: LedgerEntry; problems: Problem[] } => {
   const { id, file } = entryBlock
   const { fieldByName, steps } = readEntryFields(entryBlock)
@@ -376,6 +400,12 @@ const parseEntry = (entryBlock: EntryBlock): { entry: LedgerEntry; problems: Pro
     const message = `${id}'s what opens with a ${claim.length}-character sentence: put the claim first, in at most ${CLAIM_MAX_LENGTH} characters, and the detail after it`
     problems.push(warningAt(PROBLEM_CODES.longWhat, { file, line: whatLine }, id, message))
   }
+  const grepField = fieldByName.get('grep')
+  const grepPattern = grepField === undefined ? null : readGrepPattern(grepField)
+  if (grepField !== undefined && grepPattern === null) {
+    const message = `grep "${grepField.text}" is not a pattern JavaScript reads; write it in the syntax PCRE and JavaScript share`
+    problems.push(errorAt(PROBLEM_CODES.invalidField, { file, line: grepField.line }, id, message))
+  }
   const text = entryBlock.lines.join('\n').trimEnd()
   return {
     entry: {
@@ -392,6 +422,7 @@ const parseEntry = (entryBlock: EntryBlock): { entry: LedgerEntry; problems: Pro
       rejected: fieldByName.get('rejected')?.text ?? '',
       untestedReason: fieldByName.get('untested')?.text ?? '',
       steps,
+      grepPattern,
       text,
     },
     problems,
@@ -1015,9 +1046,109 @@ const analyzeRepo = (repoRoot: string): RepoAnalysis => {
   return { anchors, entriesById, domainsByName, lockSites, problems }
 }
 
+// ---------- Patterns: every line that sends or reads what a rule governs ----------
+
+const PROSE_LINE_PATTERNS = [COMMENT_ONLY_LINE_PATTERN, /^\s*(\/\*|\*|\{\/\*)/]
+const isProseLine = (lineText: string): boolean =>
+  PROSE_LINE_PATTERNS.some((prosePattern) => prosePattern.test(lineText))
+
+type GrepHit = { file: string; line: number; lineText: string }
+
+const toGrepHit = (grepLine: string): GrepHit => {
+  const [, file = '', lineNumberText = '', lineText = ''] =
+    GREP_OUTPUT_LINE_PATTERN.exec(grepLine) ?? []
+  return { file, line: Number(lineNumberText), lineText }
+}
+
+// git's first line of complaint when it refuses a pattern, or runs without PCRE.
+type PatternGrep = { grepLines: string[]; refusal: string | null }
+
+const grepPatterns = (repoRoot: string, patternSources: string[]): PatternGrep => {
+  const patternArguments = patternSources.flatMap((patternSource) => ['-e', patternSource])
+  try {
+    return { grepLines: grepRepoLines(repoRoot, ['-P', ...patternArguments]), refusal: null }
+  } catch (error: unknown) {
+    const stderrText = error instanceof Error && 'stderr' in error ? String(error.stderr) : ''
+    const [refusal = String(error)] = stderrText
+      .split('\n')
+      .filter((stderrLine) => stderrLine !== '')
+    return { grepLines: [], refusal }
+  }
+}
+
+const PCRE_MISSING_MARKER = 'USE_LIBPCRE'
+
+const checkGrepPatterns = (repoRoot: string, analysis: RepoAnalysis): Problem[] => {
+  const patternedEntries = [...analysis.entriesById.values()].filter(
+    (entry) => entry.status === ENTRY_STATUSES.active && entry.grepPattern !== null,
+  )
+  if (patternedEntries.length === 0) {
+    return []
+  }
+  const problems: Problem[] = []
+  const sourceOf = (entry: LedgerEntry): string => entry.grepPattern?.source ?? ''
+  const grepOfAll = grepPatterns(repoRoot, patternedEntries.map(sourceOf))
+  const [firstPatternedEntry] = patternedEntries
+  const isPcreMissing = grepOfAll.refusal?.includes(PCRE_MISSING_MARKER) === true
+  if (isPcreMissing && firstPatternedEntry !== undefined) {
+    const place = {
+      file: firstPatternedEntry.file,
+      line: firstPatternedEntry.grepPattern?.line ?? 1,
+    }
+    const message = `git refuses grep -P here (${grepOfAll.refusal}): every grep: field goes unchecked until git has PCRE`
+    return [warningAt(PROBLEM_CODES.grepUnavailable, place, null, message)]
+  }
+  // A refused run is read again one pattern at a time, so one bad pattern leaves the others checked.
+  const grepOfEach =
+    grepOfAll.refusal === null
+      ? []
+      : patternedEntries.map((entry) => ({ entry, ...grepPatterns(repoRoot, [sourceOf(entry)]) }))
+  for (const { entry, refusal } of grepOfEach.filter((grepOfOne) => grepOfOne.refusal !== null)) {
+    const place = { file: entry.file, line: entry.grepPattern?.line ?? entry.line }
+    const message = `git grep -P refuses the grep of ${entry.id} (${refusal}): write it in the syntax PCRE and JavaScript share`
+    problems.push(errorAt(PROBLEM_CODES.invalidField, place, entry.id, message))
+  }
+  const checkedEntries =
+    grepOfAll.refusal === null
+      ? patternedEntries
+      : grepOfEach.filter((grepOfOne) => grepOfOne.refusal === null).map(({ entry }) => entry)
+  const grepLines =
+    grepOfAll.refusal === null
+      ? grepOfAll.grepLines
+      : [...new Set(grepOfEach.flatMap((grepOfOne) => grepOfOne.grepLines))]
+  const grepHits = grepLines.map(toGrepHit)
+  const coveringSitesById = new Map<string, LockSite[]>()
+  for (const lockSite of analysis.lockSites) {
+    coveringSitesById.set(lockSite.id, [...(coveringSitesById.get(lockSite.id) ?? []), lockSite])
+  }
+  const isUnderAnAnchorOf = (entry: LedgerEntry, grepHit: GrepHit): boolean =>
+    (coveringSitesById.get(entry.id) ?? []).some(
+      (lockSite) =>
+        lockSite.file === grepHit.file &&
+        lockSite.line <= grepHit.line &&
+        grepHit.line <= lockSite.lastLine,
+    )
+  for (const grepHit of grepHits.filter((hit) => !isProseLine(hit.lineText))) {
+    const matchingEntries = checkedEntries.filter((entry) =>
+      entry.grepPattern?.pattern.test(grepHit.lineText),
+    )
+    if (matchingEntries.length === 0) {
+      const message =
+        'git grep -P found this line, and no grep: field matches it in JavaScript: write the patterns in the syntax both read'
+      problems.push(warningAt(PROBLEM_CODES.grepMismatch, grepHit, null, message))
+    }
+    for (const entry of matchingEntries.filter((entry) => !isUnderAnAnchorOf(entry, grepHit))) {
+      const message = `this line has what the grep: of ${entry.id} looks for, under none of its anchors: if it sends or reads what the rule governs, anchor it (§uses ${entry.id}@${entry.version}, §test in a test); if not, narrow the pattern.`
+      problems.push(errorAt(PROBLEM_CODES.unanchoredMatch, grepHit, entry.id, message))
+    }
+  }
+  return problems
+}
+
 const findAllProblems = (repoRoot: string, analysis: RepoAnalysis): Problem[] =>
   [
     ...analysis.problems,
+    ...checkGrepPatterns(repoRoot, analysis),
     ...checkLock(analysis.lockSites, readLock(repoRoot), createRenamesReader(repoRoot)),
   ].sort(byFileThenLine)
 

@@ -934,6 +934,155 @@ describe('lock', () => {
   })
 })
 
+describe('patterns', () => {
+  const tagChangesEntry = (grepText: string): string =>
+    [
+      '## live.tag-changes-signalled',
+      'kind: invariant',
+      'version: 1',
+      'what: A change of a tag is pushed to everyone who sees it.',
+      'why: Every reader of the frame reads its tags again.',
+      `grep: ${grepText}`,
+      'source: fixture',
+      '',
+    ].join('\n')
+  const retiredEntry = [
+    '## live.tag-renames-signalled',
+    'kind: invariant',
+    'version: 1',
+    'status: retired',
+    'what: A rename of a tag was its own frame.',
+    'why: Folded into tag-changes-signalled.',
+    'grep: \\breload\\(',
+    'source: fixture',
+    '',
+  ].join('\n')
+  const fixtureFiles = (grepText: string): Record<string, string> => ({
+    'src/send.ts': [
+      '// §invariant live.tag-changes-signalled@1',
+      'export const sendTagChanged = () => push(FRAMES.tagChanged)',
+      '',
+    ].join('\n'),
+    'src/shell.ts': [
+      '// §uses live.tag-changes-signalled@1',
+      'const isTagFrame = (frame: Frame): boolean =>',
+      '  frame.type === FRAMES.other ||',
+      '  frame.type === FRAMES.tagChanged',
+      '',
+    ].join('\n'),
+    'src/sidebar.ts': [
+      'export const onFrame = (frame: Frame) => {',
+      '  // FRAMES.tagChanged reaches the sidebar too.',
+      '  if (frame.type === FRAMES.tagChanged) {',
+      '    reload()',
+      '  }',
+      '}',
+      '',
+    ].join('\n'),
+    'src/send.test.ts': [
+      '// §test live.tag-changes-signalled@1',
+      "test('a rename pushes the frame', () => {",
+      '  expect(sentFrames()).toEqual([FRAMES.tagChanged])',
+      '})',
+      '',
+    ].join('\n'),
+    'docs/frames.md': 'Every reader of FRAMES.tagChanged reads again.\n',
+    'logicmap/ignore': 'docs/\n',
+    'logicmap/live.md': ['# live', '', tagChangesEntry(grepText), retiredEntry].join('\n'),
+  })
+
+  const roomFramesEntry = [
+    '## sync.room-frames-read',
+    'kind: invariant',
+    'version: 1',
+    'what: Every room frame is read.',
+    'why: A frame nobody reads is lost.',
+    'grep: \\bROOM_FRAMES\\.\\w+',
+    'source: fixture',
+    '',
+  ].join('\n')
+  // The anchor covers its first line only: the second stands alone.
+  const roomFramesLines = [
+    '// §invariant sync.room-frames-read@1',
+    'read(ROOM_FRAMES.join)',
+    'read(ROOM_FRAMES.leave)',
+    '',
+  ]
+
+  test('a line the pattern finds is under an anchor of its rule, of any role; comments and ignored paths are left out', () => {
+    const repoRoot = createFixtureRepo(fixtureFiles('\\bFRAMES\\.tagChanged\\b'))
+    ackIds(repoRoot, ['live.tag-changes-signalled'])
+
+    expect(describeErrors(repoRoot)).toEqual(['unanchored-match src/sidebar.ts:3'])
+    const unanchoredMessage = checkRepo(repoRoot).find(
+      (problem) => problem.code === PROBLEM_CODES.unanchoredMatch,
+    )?.message
+    expect(unanchoredMessage).toContain('live.tag-changes-signalled')
+    expect(unanchoredMessage).toContain('§uses live.tag-changes-signalled@1')
+  })
+
+  test('a pattern JavaScript cannot read is invalid-field, and the other entries are still checked', () => {
+    const repoRoot = createFixtureRepo(fixtureFiles('('))
+    writeFixtureFiles(repoRoot, {
+      'logicmap/sync.md': ['# sync', '', roomFramesEntry].join('\n'),
+      'src/room.ts': roomFramesLines.join('\n'),
+    })
+    ackIds(repoRoot, ['live.tag-changes-signalled', 'sync.room-frames-read'])
+
+    expect(describeErrors(repoRoot)).toEqual([
+      'invalid-field logicmap/live.md:8',
+      'unanchored-match src/room.ts:3',
+    ])
+  })
+
+  test('a pattern PCRE refuses is invalid-field, quoting git, and the other entries are still checked', () => {
+    const repoRoot = createFixtureRepo(fixtureFiles('FRAMES\\c'))
+    writeFixtureFiles(repoRoot, {
+      'logicmap/sync.md': ['# sync', '', roomFramesEntry].join('\n'),
+      'src/room.ts': roomFramesLines.join('\n'),
+    })
+    ackIds(repoRoot, ['live.tag-changes-signalled', 'sync.room-frames-read'])
+
+    expect(describeErrors(repoRoot)).toEqual([
+      'invalid-field logicmap/live.md:8',
+      'unanchored-match src/room.ts:3',
+    ])
+    const invalidMessage = checkRepo(repoRoot).find(
+      (problem) => problem.code === PROBLEM_CODES.invalidField,
+    )?.message
+    expect(invalidMessage).toContain('\\c at end of pattern')
+  })
+
+  test('a git without PCRE gives one grep-unavailable warning and no error', () => {
+    const repoRoot = createFixtureRepo(fixtureFiles('\\bFRAMES\\.tagChanged\\b'))
+    ackIds(repoRoot, ['live.tag-changes-signalled'])
+    const realGitPath = execFileSync('which', ['git'], { encoding: 'utf8' }).trim()
+    const shimDirectory = mkdtempSync(join(tmpdir(), 'logicmap-git-without-pcre-'))
+    fixtureRepoRoots.push(shimDirectory)
+    writeFileSync(
+      join(shimDirectory, 'git'),
+      [
+        '#!/bin/sh',
+        'if [ "$1" = grep ] && printf "%s\\n" "$@" | grep -qx -- -P; then',
+        '  echo "fatal: cannot use Perl-compatible regexes when not compiled with USE_LIBPCRE" >&2',
+        '  exit 128',
+        'fi',
+        `exec "${realGitPath}" "$@"`,
+        '',
+      ].join('\n'),
+      { mode: 0o755 },
+    )
+    const pathBefore = process.env.PATH
+    process.env.PATH = `${shimDirectory}:${pathBefore}`
+    try {
+      expect(describeErrors(repoRoot)).toEqual([])
+      expect(describeWarnings(repoRoot)).toEqual(['grep-unavailable logicmap/live.md:8'])
+    } finally {
+      process.env.PATH = pathBefore
+    }
+  })
+})
+
 describe('coverage', () => {
   test('an edge or invariant with no test anchor is a warning; a decision needs none', () => {
     const repoRoot = createFixtureRepo({

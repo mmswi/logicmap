@@ -60,13 +60,13 @@ The two improvements the agent proposed, each from TODO 115's evidence:
 Files: `scripts/logicmap.ts`, `scripts/logicmap.test.ts`
 
 ### 2. `grep:` makes every reader a site
-- [ ] Red: a line the pattern finds under no anchor of the rule is `unanchored-match`; under a `uses`, a `test` or a
+- [x] Red: a line the pattern finds under no anchor of the rule is `unanchored-match`; under a `uses`, a `test` or a
   defining anchor it is fine; a comment line, a line in `logicmap/` or an ignored path is left out; a retired entry's
-  pattern reads nothing; a pattern JavaScript can't read is `invalid-field`.
-- [ ] Green: the `grep` field; one `git grep -P` for every pattern; each line given to the entries whose pattern
+  pattern reads nothing; a pattern JavaScript can't read, or PCRE refuses, is `invalid-field` and the others are still checked; a line git finds that no pattern matches in JavaScript is the warning `grep-mismatch`.
+- [x] Green: the `grep` field; one `git grep -P` for every pattern; each line given to the entries whose pattern
   matches it; the covered lines of each id's anchors.
-- [ ] Red: git without PCRE: one `grep-unavailable` warning, no error.
-- [ ] Green: the failed call's message read.
+- [x] Red: git without PCRE: one `grep-unavailable` warning, no error.
+- [x] Green: the failed call's message read.
 Files: `scripts/logicmap.ts`, `scripts/logicmap.test.ts`
 
 ### 3. The docs
