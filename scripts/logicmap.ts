@@ -61,6 +61,7 @@ export const PROBLEM_CODES = {
   stepWithoutSite: 'step-without-site',
   unacked: 'unacked',
   changed: 'changed',
+  renamed: 'renamed',
   gone: 'gone',
   unknownId: 'unknown-id',
   untested: 'untested',
@@ -582,18 +583,60 @@ const ANCHOR_PATTERN_GLOBAL = new RegExp(ANCHOR_SOURCE, 'g')
 // What is left of a line that held only an anchor: the comment markers it sat between.
 const ANCHOR_RESIDUE_PATTERN = /^(\/\/|#|--|\*|\/\*|\*\/|\/\*\s*\*\/|\{\/\*\s*\*\/\}|<!--\s*-->)?$/
 
+const shortHashOf = (text: string): string =>
+  createHash('sha256').update(text).digest('hex').slice(0, 12)
+
 // Whitespace and anchors are left out, so reformatting a block, moving another pin, or adding an
-// anchor inside the block changes nothing. An entry's text is fingerprinted this way.
-const fingerprintLines = (lines: string[]): string => {
-  const normalizedText = lines
+// anchor inside the block changes nothing.
+const normalizeLines = (lines: string[]): string[] =>
+  lines
     .map((line) => line.replace(ANCHOR_PATTERN_GLOBAL, '').replace(/\s+/g, ' ').trim())
     .filter((line) => !ANCHOR_RESIDUE_PATTERN.test(line))
-    .join('\n')
-  return createHash('sha256').update(normalizedText).digest('hex').slice(0, 12)
+
+// An entry's text is fingerprinted this way too.
+const fingerprintLines = (lines: string[]): string => shortHashOf(normalizeLines(lines).join('\n'))
+
+// Words a rename never touches: changing one changes what the code does.
+const KEYWORDS: ReadonlySet<string> = new Set(
+  [
+    'abstract as async await break case catch class const continue debugger declare default delete do else enum',
+    'export extends false finally for function if implements import in infer instanceof interface is keyof let',
+    'namespace new null of private protected public readonly return satisfies static super switch this throw true',
+    'try type typeof undefined var void while with yield any bigint boolean never number object string symbol unknown',
+  ]
+    .join(' ')
+    .split(' '),
+)
+// A string, a number, a word, or any other single character; whitespace is collapsed already. A template literal
+// is one token, so a rename inside it reads as a change.
+const CODE_TOKEN_PATTERN =
+  /'(?:\\.|[^'\\])*'|"(?:\\.|[^"\\])*"|`(?:\\.|[^`\\])*`|\d[\w.]*|[A-Za-z_$][\w$]*|\S/g
+const WORD_PATTERN = /^[A-Za-z_$][\w$]*$/
+const isRenamableWord = (token: string): boolean => WORD_PATTERN.test(token) && !KEYWORDS.has(token)
+
+const listCodeTokensByLine = (lines: string[]): string[][] =>
+  normalizeLines(lines).map((line) => line.match(CODE_TOKEN_PATTERN) ?? [])
+
+// The code with each word that isn't a keyword replaced by its order of first appearance: two blocks of one shape
+// differ only by words renamed one for one. Lines stay apart, so one shape is one line structure.
+const shapeOfLines = (lines: string[]): string => {
+  const orderByWord = new Map<string, number>()
+  const orderOf = (word: string): number => {
+    const order = orderByWord.get(word) ?? orderByWord.size + 1
+    orderByWord.set(word, order)
+    return order
+  }
+  const shapeLines = listCodeTokensByLine(lines).map((lineTokens) =>
+    lineTokens.map((token) => (isRenamableWord(token) ? `$${orderOf(token)}` : token)).join(' '),
+  )
+  return shortHashOf(shapeLines.join('\n'))
 }
 
-// Marks a code fingerprint taken without comments; a lock line without it holds one taken with them.
-const CODE_FINGERPRINT_PREFIX = 'v2:'
+// A code lock token is "v3:<code>.<shape>". A "v2:<code>" token, written before shapes, has no shape; a token
+// with no prefix was taken with comments.
+const CODE_FINGERPRINT_PREFIX = 'v3:'
+const CODE_FINGERPRINT_PREFIX_BEFORE_SHAPES = 'v2:'
+const SHAPE_SEPARATOR = '.'
 // `# ` and `-- ` but not `#private` or `--count`; a comment at the end of a code line stays in, since
 // a `//` can sit inside a string.
 const COMMENT_ONLY_LINE_PATTERN = /^\s*(\/\/|#(\s|!|$)|--(\s|$)|<!--)/
@@ -616,8 +659,15 @@ const dropCommentLines = (lines: string[]): string[] => {
 }
 
 // Rewording a comment in the block changes nothing either.
-const fingerprintCode = (lines: string[]): string =>
-  `${CODE_FINGERPRINT_PREFIX}${fingerprintLines(dropCommentLines(lines))}`
+const fingerprintCode = (lines: string[]): string => {
+  const codeLines = dropCommentLines(lines)
+  return `${CODE_FINGERPRINT_PREFIX}${fingerprintLines(codeLines)}${SHAPE_SEPARATOR}${shapeOfLines(codeLines)}`
+}
+
+const codePartOf = (codeToken: string): string =>
+  codeToken.slice(CODE_FINGERPRINT_PREFIX.length).split(SHAPE_SEPARATOR)[0] ?? ''
+const shapePartOf = (codeToken: string): string =>
+  codeToken.slice(CODE_FINGERPRINT_PREFIX.length).split(SHAPE_SEPARATOR)[1] ?? ''
 
 // A JSX comment (`{/* ... */}`) counts too: among JSX children it is the only comment that stays one.
 const COMMENT_LINE_PATTERN = /^\s*(\/\/|\/\*|\*|#|--|<!--|\{\/\*)/
@@ -638,6 +688,13 @@ const isBlankLine = (line: string): boolean => line.trim() === ''
  *          (a closing line that opens a new block keeps the block going)
  */
 type AnchoredLineRange = { headLineIndex: number; lastLineIndex: number }
+
+const anchoredLinesAt = (fileLines: string[], anchorLineIndex: number): string[] => {
+  const anchoredLineRange = findAnchoredLineRange(fileLines, anchorLineIndex)
+  return anchoredLineRange === null
+    ? []
+    : fileLines.slice(anchoredLineRange.headLineIndex, anchoredLineRange.lastLineIndex + 1)
+}
 
 const findAnchoredLineRange = (
   fileLines: string[],
@@ -708,10 +765,7 @@ const collectLockSites = (
     const occurrence = (occurrenceCountByPlace.get(place) ?? 0) + 1
     occurrenceCountByPlace.set(place, occurrence)
     const anchoredLineRange = findAnchoredLineRange(fileLines, anchor.line - 1)
-    const anchoredLines =
-      anchoredLineRange === null
-        ? []
-        : fileLines.slice(anchoredLineRange.headLineIndex, anchoredLineRange.lastLineIndex + 1)
+    const anchoredLines = anchoredLinesAt(fileLines, anchor.line - 1)
     lockSites.push({
       key: `${place}#${occurrence}`,
       isInLock: isDefiningRole(anchor.role),
@@ -790,14 +844,26 @@ const readLock = (repoRoot: string): Map<string, LockedSite> => {
   return lockedSitesByKey
 }
 
-// A lock line compares by the fingerprint it holds: taken without comments, or with them, before.
+// A lock line compares by the fingerprint it holds: the code's part of a v3: token, a v2: token's code, or, before
+// either, the code with its comments. An entry's line holds its fingerprint with no prefix.
 const isAsLocked = (lockSite: LockSite, lockedSite: LockedSite): boolean => {
-  const isLockedWithoutComments = lockedSite.fingerprint.startsWith(CODE_FINGERPRINT_PREFIX)
-  const currentFingerprint = isLockedWithoutComments
-    ? lockSite.fingerprint
-    : lockSite.fingerprintWithComments
-  return lockedSite.version === lockSite.version && lockedSite.fingerprint === currentFingerprint
+  const lockedFingerprint = lockedSite.fingerprint
+  const isLockedWithShape = lockedFingerprint.startsWith(CODE_FINGERPRINT_PREFIX)
+  const isLockedBeforeShapes = lockedFingerprint.startsWith(CODE_FINGERPRINT_PREFIX_BEFORE_SHAPES)
+  const isSameCode = isLockedWithShape
+    ? codePartOf(lockedFingerprint) === codePartOf(lockSite.fingerprint)
+    : isLockedBeforeShapes
+      ? lockedFingerprint.slice(CODE_FINGERPRINT_PREFIX_BEFORE_SHAPES.length) ===
+        codePartOf(lockSite.fingerprint)
+      : lockedFingerprint === lockSite.fingerprintWithComments
+  return lockedSite.version === lockSite.version && isSameCode
 }
+
+// Its words renamed one for one since its ack, nothing else: a v3: line of the same version and shape.
+const isRenamedSinceLocked = (lockSite: LockSite, lockedSite: LockedSite): boolean =>
+  lockedSite.fingerprint.startsWith(CODE_FINGERPRINT_PREFIX) &&
+  lockedSite.version === lockSite.version &&
+  shapePartOf(lockedSite.fingerprint) === shapePartOf(lockSite.fingerprint)
 
 // "<id> <role>": a site moved to another file, or renumbered in its own, keeps them.
 const idAndRoleOfLockKey = (key: string): string => key.split(' ').slice(0, 2).join(' ')
@@ -807,7 +873,7 @@ const idAndRoleOfLockKey = (key: string): string => key.split(' ').slice(0, 2).j
  *
  *   1. its own key, its code as locked                          → as locked
  *   2. another unclaimed key of its id and role, its code there  → moved (another file, or renumbered)
- *   3. its own key, unclaimed, other code                        → changed
+ *   3. its own key, unclaimed, other code                        → changed, or renamed when only its words were
  *   4. none                                                      → unacked
  *   a lock line no site claimed                                  → gone
  */
@@ -823,7 +889,14 @@ const longBlockHintOf = (lockSite: LockSite): string => {
     : ''
 }
 
-const checkLock = (lockSites: LockSite[], lockedSitesByKey: Map<string, LockedSite>): Problem[] => {
+// The words a renamed site renamed since its ack, "old → new"; null when its acked code can't be read back.
+type RenamesReader = (lockSite: LockSite, lockedSite: LockedSite) => string[] | null
+
+const checkLock = (
+  lockSites: LockSite[],
+  lockedSitesByKey: Map<string, LockedSite>,
+  listRenamesOf: RenamesReader,
+): Problem[] => {
   const problems: Problem[] = []
   const claimedKeys = new Set<string>()
   const claimLockLineOf = (lockSite: LockSite, key: string): boolean => {
@@ -846,6 +919,18 @@ const checkLock = (lockSites: LockSite[], lockedSitesByKey: Map<string, LockedSi
   })
   for (const lockSite of sitesNotMoved) {
     const isOwnKeyFree = lockedSitesByKey.has(lockSite.key) && !claimedKeys.has(lockSite.key)
+    const lockedSite = lockedSitesByKey.get(lockSite.key)
+    if (isOwnKeyFree && lockedSite !== undefined && isRenamedSinceLocked(lockSite, lockedSite)) {
+      claimedKeys.add(lockSite.key)
+      const renames = listRenamesOf(lockSite, lockedSite)
+      const renamesText =
+        renames === null
+          ? ` (logicmap diff ${lockSite.id} shows them: no commit holds the code of its ack)`
+          : `: ${renames.join(', ')}`
+      const message = `${lockSite.label} changed only by words renamed one for one since the last ack${renamesText}. If no new name points at another thing, ack --renamed; if one does, re-read the entry ${lockSite.id} as for a change.`
+      problems.push(errorAt(PROBLEM_CODES.renamed, lockSite, lockSite.id, message))
+      continue
+    }
     if (isOwnKeyFree) {
       claimedKeys.add(lockSite.key)
       const message = `${lockSite.label} changed since the last ack: re-read the entry ${lockSite.id}; it still holds → ack ${lockSite.id}; its meaning changed → bump its version.${longBlockHintOf(lockSite)}`
@@ -904,7 +989,10 @@ const analyzeRepo = (repoRoot: string): RepoAnalysis => {
 }
 
 const findAllProblems = (repoRoot: string, analysis: RepoAnalysis): Problem[] =>
-  [...analysis.problems, ...checkLock(analysis.lockSites, readLock(repoRoot))].sort(byFileThenLine)
+  [
+    ...analysis.problems,
+    ...checkLock(analysis.lockSites, readLock(repoRoot), createRenamesReader(repoRoot)),
+  ].sort(byFileThenLine)
 
 // ---------- Entry points: check, ack, show ----------
 
@@ -983,6 +1071,26 @@ export const ackIds = (
     }
   }
   return { ackedIds: [...requestedIds], blockingProblems: [] }
+}
+
+// Acks every id whose only errors are renames; an id with a change beside its rename is left for a reading.
+export const ackRenamedIds = (repoRoot: string): { ackedIds: string[]; leftIds: string[] } => {
+  const errors = checkRepo(repoRoot).filter(
+    (problem) => problem.severity === PROBLEM_SEVERITIES.error,
+  )
+  const renamedIds = new Set(
+    errors.flatMap((problem) =>
+      problem.code === PROBLEM_CODES.renamed && problem.id !== null ? [problem.id] : [],
+    ),
+  )
+  const isOnlyRenamed = (id: string): boolean =>
+    errors.every((problem) => problem.id !== id || problem.code === PROBLEM_CODES.renamed)
+  const idsToAck = [...renamedIds].filter(isOnlyRenamed).sort()
+  const leftIds = [...renamedIds].filter((id) => !isOnlyRenamed(id)).sort()
+  if (idsToAck.length > 0) {
+    ackIds(repoRoot, idsToAck)
+  }
+  return { ackedIds: idsToAck, leftIds }
 }
 
 const ANCHOR_ROLE_ORDER: readonly string[] = ANCHOR_ROLE_NAMES
@@ -1251,6 +1359,77 @@ const findAckCommit = (repoRoot: string, lockFile: string, lockLine: string): st
     return ackCommit.trim() === '' ? null : ackCommit.trim()
   } catch {
     return null
+  }
+}
+
+// Where the nth anchor of a lock key's id and role sits in these lines, counted as collectLockSites counts it.
+const findNthAnchorLineIndex = (fileLines: string[], key: string): number | null => {
+  const [id, role] = key.split(' ')
+  const occurrence = Number(key.slice(key.lastIndexOf('#') + 1))
+  let seenCount = 0
+  for (const [lineIndex, line] of fileLines.entries()) {
+    for (const anchorMatch of line.matchAll(ANCHOR_PATTERN_GLOBAL)) {
+      const isOfIdAndRole = anchorMatch[1] === role && anchorMatch[2] === id
+      seenCount += isOfIdAndRole ? 1 : 0
+      if (isOfIdAndRole && seenCount === occurrence) {
+        return lineIndex
+      }
+    }
+  }
+  return null
+}
+
+// Each word renamed, "old → new", in the order the code holds them; the two blocks have one shape.
+const pairRenamedWords = (ackedLines: string[], currentLines: string[]): string[] => {
+  const ackedTokens = listCodeTokensByLine(dropCommentLines(ackedLines)).flat()
+  const currentTokens = listCodeTokensByLine(dropCommentLines(currentLines)).flat()
+  const renames = ackedTokens.flatMap((ackedToken, tokenIndex) => {
+    const currentToken = currentTokens[tokenIndex] ?? ackedToken
+    return ackedToken === currentToken ? [] : [`${ackedToken} → ${currentToken}`]
+  })
+  return [...new Set(renames)]
+}
+
+// A site's acked code read back from git: from HEAD, which holds it once its ack is committed and the code wasn't
+// since; else from the commit that wrote its lock line. Either is used only when its code is the locked one. One git
+// call per commit and file in a run.
+const createRenamesReader = (repoRoot: string): RenamesReader => {
+  const fileLinesByRevisionPath = new Map<string, string[]>()
+  const fileLinesAt = (commit: string, file: string): string[] => {
+    const revisionPath = `${commit}:${file}`
+    const fileLines =
+      fileLinesByRevisionPath.get(revisionPath) ??
+      runGitOrEmpty(repoRoot, ['show', revisionPath]).split('\n')
+    fileLinesByRevisionPath.set(revisionPath, fileLines)
+    return fileLines
+  }
+  const ackedLinesAt = (
+    commit: string,
+    lockSite: LockSite,
+    lockedSite: LockedSite,
+  ): string[] | null => {
+    const fileLines = fileLinesAt(commit, lockSite.file)
+    const anchorLineIndex = findNthAnchorLineIndex(fileLines, lockSite.key)
+    if (anchorLineIndex === null) {
+      return null
+    }
+    const ackedLines = anchoredLinesAt(fileLines, anchorLineIndex)
+    const isTheAckedCode =
+      codePartOf(fingerprintCode(ackedLines)) === codePartOf(lockedSite.fingerprint)
+    return isTheAckedCode ? ackedLines : null
+  }
+  return (lockSite, lockedSite) => {
+    const lockLine = `${lockSite.key} ${lockedSite.version} ${lockedSite.fingerprint}`
+    const readAtAckCommit = (): string[] | null => {
+      const ackCommit = findAckCommit(repoRoot, lockedSite.file, lockLine)
+      return ackCommit === null ? null : ackedLinesAt(ackCommit, lockSite, lockedSite)
+    }
+    const ackedLines = ackedLinesAt('HEAD', lockSite, lockedSite) ?? readAtAckCommit()
+    if (ackedLines === null) {
+      return null
+    }
+    const currentFileLines = readFileSync(join(repoRoot, lockSite.file), 'utf8').split('\n')
+    return pairRenamedWords(ackedLines, anchoredLinesAt(currentFileLines, lockSite.line - 1))
   }
 }
 
@@ -1986,6 +2165,7 @@ export const whyLogicMap = (repoRoot: string, target: string): string => {
 const USAGE = [
   'usage: bun logicmap.ts check              every problem, one per line; exit 1 on any error',
   "       bun logicmap.ts ack <id>...         record these ids' code and entries as verified",
+  '       bun logicmap.ts ack --renamed       ack every id whose only errors are renames, after reading them',
   '       bun logicmap.ts show [<domain> | <id> | <file>[:<line>[-<line>]]]',
   "                                           every domain; a domain's rules; one rule and its sites; a file's rules",
   "       bun logicmap.ts diff <id>           what changed under the id's sites since their last ack",
@@ -2025,6 +2205,14 @@ const runCommandLine = (commandLineArguments: string[]): number => {
     ).length
     console.log(`logicmap: errors ${errorCount}, warnings ${problems.length - errorCount}`)
     return errorCount > 0 ? 1 : 0
+  }
+  if (command === 'ack' && commandArguments.length === 1 && commandArguments[0] === '--renamed') {
+    const { ackedIds, leftIds } = ackRenamedIds(repoRoot)
+    console.log(`logicmap: acked ${ackedIds.length > 0 ? ackedIds.join(', ') : 'nothing'}`)
+    if (leftIds.length > 0) {
+      console.log(`logicmap: left, a change beside the rename: ${leftIds.join(', ')}`)
+    }
+    return ackedIds.length === 0 && leftIds.length > 0 ? 1 : 0
   }
   if (command === 'ack' && commandArguments.length > 0) {
     const { ackedIds, blockingProblems } = ackIds(repoRoot, commandArguments)

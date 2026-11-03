@@ -17,6 +17,7 @@ import {
   PROBLEM_SEVERITIES,
   type Problem,
   ackIds,
+  ackRenamedIds,
   checkRepo,
   diffLogicMap,
   showLogicMap,
@@ -72,6 +73,7 @@ const listFixtureLockFileNames = (repoRoot: string): string[] =>
 const LOCK_PROBLEM_CODES: readonly string[] = [
   PROBLEM_CODES.unacked,
   PROBLEM_CODES.changed,
+  PROBLEM_CODES.renamed,
   PROBLEM_CODES.gone,
 ]
 const isLockProblem = (problem: Problem): boolean => LOCK_PROBLEM_CODES.includes(problem.code)
@@ -510,7 +512,7 @@ describe('lock', () => {
     }
 
     expect(readFixtureFile(repoRoot, 'logicmap/sync.lock')).toMatch(
-      /^sync\.close-during-join edge src\/room\.ts#1 1 v2:[0-9a-f]{12}$/m,
+      /^sync\.close-during-join edge src\/room\.ts#1 1 v3:[0-9a-f]{12}\.[0-9a-f]{12}$/m,
     )
     replaceRoomLine(3, '    // A socket that closed while the room loaded is still in it.')
     replaceRoomLine(5, '      join → close → load → remove')
@@ -520,8 +522,9 @@ describe('lock', () => {
     expect(describeLockProblems(repoRoot)).toEqual(['changed src/room.ts:2'])
 
     ackIds(repoRoot, ['sync.close-during-join'])
+    // Read as a comment, the line would change nothing; read as code, its word is renamed.
     replaceRoomLine(8, '    --attempts')
-    expect(describeLockProblems(repoRoot)).toEqual(['changed src/room.ts:2'])
+    expect(describeLockProblems(repoRoot)).toEqual(['renamed src/room.ts:2'])
   })
 
   test('a lock line written before comments left the fingerprint still holds, and an ack of its domain renews it', () => {
@@ -558,15 +561,162 @@ describe('lock', () => {
     writeFixtureFiles(repoRoot, { 'src/room.ts': roomLines.join('\n') })
     ackIds(repoRoot, ['sync.pooled-buffer-slice'])
     expect(lockLineOf('sync.close-during-join edge')).toBe(lockLinesOfBefore[0])
-    expect(lockLineOf('sync.pooled-buffer-slice edge')).toMatch(/ 1 v2:[0-9a-f]{12}$/)
+    expect(lockLineOf('sync.pooled-buffer-slice edge')).toMatch(/ 1 v3:[0-9a-f]{12}\.[0-9a-f]{12}$/)
     expect(describeLockProblems(repoRoot)).toEqual(['changed src/room.ts:1'])
 
     roomLines[3] = '  joined.removeConnection(connection)'
     writeFixtureFiles(repoRoot, { 'src/room.ts': roomLines.join('\n') })
     ackIds(repoRoot, ['sync.pooled-buffer-slice'])
-    expect(lockLineOf('sync.close-during-join edge')).toMatch(/ 1 v2:[0-9a-f]{12}$/)
+    expect(lockLineOf('sync.close-during-join edge')).toMatch(/ 1 v3:[0-9a-f]{12}\.[0-9a-f]{12}$/)
     expect(lockLineOf('sync.close-during-join entry')).toBe(lockLinesOfBefore[1])
     expect(describeLockProblems(repoRoot)).toEqual([])
+  })
+
+  test('identifiers renamed one for one are renamed; one standing for two, a keyword or a string changed is changed', () => {
+    const roomLines = [
+      '// §edge sync.close-during-join@1',
+      'if (closedEarly && isOpen) {',
+      "  joined.removeConnection(connection, 'closed')",
+      '  return',
+      '}',
+      '',
+    ]
+    const repoRoot = createFixtureRepo({
+      'src/room.ts': roomLines.join('\n'),
+      'logicmap/sync.md': closeDuringJoinEntry(1),
+    })
+    ackIds(repoRoot, ['sync.close-during-join'])
+    const writeRoomWith = (lineIndex: number, replacementLine: string): void => {
+      const editedLines = roomLines.with(lineIndex, replacementLine)
+      writeFixtureFiles(repoRoot, { 'src/room.ts': editedLines.join('\n') })
+    }
+    roomLines[1] = 'if (closedBeforeJoin && isOpen) {'
+    roomLines[2] = "  joinedRoom.removeConnection(connection, 'closed')"
+
+    writeRoomWith(3, '  return')
+    expect(describeLockProblems(repoRoot)).toEqual(['renamed src/room.ts:1'])
+
+    writeRoomWith(1, 'if (closedBeforeJoin && closedBeforeJoin) {')
+    expect(describeLockProblems(repoRoot)).toEqual(['changed src/room.ts:1'])
+
+    writeRoomWith(3, '  continue')
+    expect(describeLockProblems(repoRoot)).toEqual(['changed src/room.ts:1'])
+
+    writeRoomWith(2, "  joinedRoom.removeConnection(connection, 'gone')")
+    expect(describeLockProblems(repoRoot)).toEqual(['changed src/room.ts:1'])
+  })
+
+  test('a renamed site lists its renames from the code of its ack, in its commit or in HEAD; else it names diff', () => {
+    const roomLines = [
+      '// §edge sync.close-during-join@1',
+      'if (closedEarly) {',
+      '  joined.removeConnection(connection)',
+      '}',
+      '',
+    ]
+    const repoRoot = createFixtureRepo({
+      'src/room.ts': roomLines.join('\n'),
+      'logicmap/sync.md': closeDuringJoinEntry(1),
+    })
+    const renamedMessage = (): string =>
+      checkRepo(repoRoot).find((problem) => problem.code === PROBLEM_CODES.renamed)?.message ?? ''
+    ackIds(repoRoot, ['sync.close-during-join'])
+    commitFixtureRepo(repoRoot, 'ack')
+
+    writeFixtureFiles(repoRoot, {
+      'src/room.ts': roomLines
+        .with(1, 'if (closedBeforeJoin) {')
+        .with(2, '  joinedRoom.removeConnection(connection)')
+        .join('\n'),
+    })
+    expect(renamedMessage()).toContain('closedEarly → closedBeforeJoin, joined → joinedRoom')
+    commitFixtureRepo(repoRoot, 'the rename committed, not acked')
+    expect(renamedMessage()).toContain('closedEarly → closedBeforeJoin, joined → joinedRoom')
+
+    const writeRoom = (lines: string[]): void =>
+      writeFixtureFiles(repoRoot, { 'src/room.ts': lines.join('\n') })
+    const withRemoveCall = (removeCall: string): string[] => roomLines.with(2, `  ${removeCall}`)
+
+    writeRoom(withRemoveCall('joined.removeConnection(connection, true)'))
+    ackIds(repoRoot, ['sync.close-during-join'])
+    writeRoom(withRemoveCall('joinedRoom.removeConnection(connection, true)'))
+    expect(renamedMessage()).toContain('logicmap diff sync.close-during-join')
+
+    writeRoom(withRemoveCall('joined.removeConnection(connection, false)'))
+    commitFixtureRepo(repoRoot, 'a change committed before its ack')
+    ackIds(repoRoot, ['sync.close-during-join'])
+    writeRoom(withRemoveCall('joinedRoom.removeConnection(connection, false)'))
+    expect(renamedMessage()).toContain('joined → joinedRoom')
+  })
+
+  test('ack --renamed acks the ids whose only lock problems are renames, and leaves an id with a change beside', () => {
+    const roomLines = [
+      '// §edge sync.close-during-join@1',
+      'if (closedEarly) {',
+      '  joined.removeConnection(connection)',
+      '}',
+      '// §edge sync.pooled-buffer-slice@1',
+      'const data = new Uint8Array(raw.buffer, raw.byteOffset, raw.byteLength)',
+      '',
+    ]
+    const repoRoot = createFixtureRepo({
+      'src/room.ts': roomLines.join('\n'),
+      'logicmap/sync.md': [closeDuringJoinEntry(1), pooledBufferSliceEntry].join('\n'),
+    })
+    ackIds(repoRoot, ['sync.close-during-join', 'sync.pooled-buffer-slice'])
+    writeFixtureFiles(repoRoot, {
+      'src/room.ts': roomLines
+        .with(2, '  joinedRoom.removeConnection(connection)')
+        .with(5, 'const data = new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength)')
+        .join('\n'),
+      'logicmap/sync.md': [
+        closeDuringJoinEntry(1),
+        pooledBufferSliceEntry.replace('this message.', 'this message, no more.'),
+      ].join('\n'),
+    })
+
+    expect(ackRenamedIds(repoRoot)).toEqual({
+      ackedIds: ['sync.close-during-join'],
+      leftIds: ['sync.pooled-buffer-slice'],
+    })
+    expect(describeLockProblems(repoRoot)).toEqual([
+      'changed logicmap/sync.md:8',
+      'renamed src/room.ts:5',
+    ])
+  })
+
+  test('a v2: lock line reports a rename as changed; an ack of its domain renews it to v3: and the rename is renamed', () => {
+    const roomLines = [
+      '// §edge sync.close-during-join@1',
+      'if (closedEarly) {',
+      '  joined.removeConnection(connection)',
+      '}',
+      '// §edge sync.pooled-buffer-slice@1',
+      'const data = new Uint8Array(raw.buffer, raw.byteOffset, raw.byteLength)',
+      '',
+    ]
+    const repoRoot = createFixtureRepo({
+      'src/room.ts': roomLines.join('\n'),
+      'logicmap/sync.md': [closeDuringJoinEntry(1), pooledBufferSliceEntry].join('\n'),
+    })
+    ackIds(repoRoot, ['sync.close-during-join', 'sync.pooled-buffer-slice'])
+    const lockText = readFixtureFile(repoRoot, 'logicmap/sync.lock')
+    // As the checker of before wrote it: the code's fingerprint alone, behind v2:.
+    writeFixtureFiles(repoRoot, {
+      'logicmap/sync.lock': lockText.replace(/ v3:([0-9a-f]{12})\.[0-9a-f]{12}$/gm, ' v2:$1'),
+    })
+    const renamedRoom = roomLines.with(2, '  joinedRoom.removeConnection(connection)').join('\n')
+
+    writeFixtureFiles(repoRoot, { 'src/room.ts': renamedRoom })
+    expect(describeLockProblems(repoRoot)).toEqual(['changed src/room.ts:1'])
+
+    writeFixtureFiles(repoRoot, { 'src/room.ts': roomLines.join('\n') })
+    ackIds(repoRoot, ['sync.pooled-buffer-slice'])
+    expect(readFixtureFile(repoRoot, 'logicmap/sync.lock')).toMatch(
+      /^sync\.close-during-join edge src\/room\.ts#1 1 v3:[0-9a-f]{12}\.[0-9a-f]{12}$/m,
+    )
+    writeFixtureFiles(repoRoot, { 'src/room.ts': renamedRoom })
+    expect(describeLockProblems(repoRoot)).toEqual(['renamed src/room.ts:1'])
   })
 
   test('a site that moved is not reported: a renamed file, a flow anchor renumbered by one added above it', () => {
@@ -639,8 +789,8 @@ describe('lock', () => {
     writeFixtureFiles(repoRoot, {
       'src/room.ts': roomLines
         .join('\n')
-        .replace('step3()', 'stepThree()')
-        .replace('raw.', 'bytes.'),
+        .replace('step3()', 'step3(true)')
+        .replace('raw.', 'raw?.'),
     })
     const changedMessages = checkRepo(repoRoot)
       .filter((problem) => problem.code === PROBLEM_CODES.changed)
@@ -1617,7 +1767,10 @@ describe('hook', () => {
 
     const roomText = readFixtureFile(repoRoot, 'src/room.ts')
     writeFixtureFiles(repoRoot, {
-      'src/room.ts': roomText.replace('removeConnection', 'dropConnection'),
+      'src/room.ts': roomText.replace(
+        'removeConnection(connection)',
+        'removeConnection(connection, true)',
+      ),
     })
     const editOutput = editOf()
     expect(editOutput).not.toBeNull()
@@ -1683,8 +1836,8 @@ describe('hook', () => {
     const definingEdit = contextOfEdit(
       sessionId,
       'src/room.ts',
-      'removeConnection',
-      'dropConnection',
+      'removeConnection(connection)',
+      'removeConnection(connection, true)',
     )
     expect(definingEdit).toContain('src/room.ts:2: error changed')
     expect(definingEdit).not.toContain('uses or test sites')
@@ -1700,7 +1853,10 @@ describe('hook', () => {
     const roomPath = join(repoRoot, 'src/room.ts')
     const roomText = readFixtureFile(repoRoot, 'src/room.ts')
     writeFixtureFiles(repoRoot, {
-      'src/room.ts': roomText.replace('removeConnection', 'dropConnection'),
+      'src/room.ts': roomText.replace(
+        'removeConnection(connection)',
+        'removeConnection(connection, true)',
+      ),
     })
     const editingSessionId = `editing-${crypto.randomUUID()}`
     const readingSessionId = `reading-${crypto.randomUUID()}`
