@@ -736,8 +736,34 @@ describe('lock', () => {
     renameSync(join(repoRoot, 'src/room.ts'), join(repoRoot, 'src/join-room.ts'))
     expect(describeLockProblems(repoRoot)).toEqual([])
 
+    commitFixtureRepo(repoRoot, 'the ack')
     writeFixtureFiles(repoRoot, {
       'src/join-room.ts': roomText.replace('removeConnection', 'dropConnection'),
+    })
+    expect(describeLockProblems(repoRoot)).toEqual(['renamed src/join-room.ts:1'])
+    expect(
+      checkRepo(repoRoot).find((problem) => problem.code === PROBLEM_CODES.renamed)?.message,
+    ).toContain('removeConnection → dropConnection')
+    const ackedBeforeMoveRepoRoot = createFixtureRepo({
+      'src/room.ts': roomText,
+      'logicmap/sync.md': closeDuringJoinEntry(1),
+    })
+    ackIds(ackedBeforeMoveRepoRoot, ['sync.close-during-join'])
+    commitFixtureRepo(ackedBeforeMoveRepoRoot, 'the ack, before the move')
+    renameSync(
+      join(ackedBeforeMoveRepoRoot, 'src/room.ts'),
+      join(ackedBeforeMoveRepoRoot, 'src/join-room.ts'),
+    )
+    writeFixtureFiles(ackedBeforeMoveRepoRoot, {
+      'src/join-room.ts': roomText.replace('removeConnection', 'dropConnection'),
+    })
+    expect(
+      checkRepo(ackedBeforeMoveRepoRoot).find((problem) => problem.code === PROBLEM_CODES.renamed)
+        ?.message,
+    ).toContain('removeConnection → dropConnection')
+
+    writeFixtureFiles(repoRoot, {
+      'src/join-room.ts': roomText.replace('connection)', 'connection, true)'),
     })
     expect(describeLockProblems(repoRoot)).toEqual([
       'gone logicmap/sync.lock:2',

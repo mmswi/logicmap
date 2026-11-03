@@ -95,3 +95,22 @@ export const ackRenamedIds = (repoRoot: string): { ackedIds: string[]; leftIds: 
 }
 ```
 Run: 47 pass, after the test's expected line of the edited entry moved from 9 to 8, its heading's line.
+
+## Piece 7: the failing test of a file renamed with its words
+What: the moved-site test renames `src/room.ts` to `src/join-room.ts` and `removeConnection` to `dropConnection` in
+it: `renamed src/join-room.ts:1`, its message listing `removeConnection → dropConnection`; a real change in the moved
+file (`removeConnection(connection, true)`) stays `gone` and `unacked`.
+Why: TODO 115 renamed its store's file with its words; that is the rename this step is for.
+Where: `scripts/logicmap.test.ts`, the moved-site test
+Run: red, `gone` and `unacked`.
+
+## Piece 8: a moved site takes a lock line of its shape
+What: in `checkLock`, a site with no lock line of its own looks for an unclaimed line of its id and role whose shape
+it has, and reports `renamed` on it. The renames reader takes the lock key it reads: the acked code is the nth anchor
+of the key's file, the old one when the file moved.
+Why: the moved pass already finds a site whose code is unchanged under another key; this finds one whose words alone
+changed. Its own line is tried first, so a site that stayed in its file is read as before.
+Where: `scripts/logicmap.ts`, `checkLock` and `createRenamesReader`
+Run: `renamed` reported, but with no list: the test commits the ack together with the move, so no commit holds the old
+path. The reader then tries the site's own file too, in HEAD and in the ack's commit, the fingerprint still deciding;
+the test gains a second repo where the ack is committed before the move, read from the old path in HEAD. 47 pass.

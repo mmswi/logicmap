@@ -868,6 +868,9 @@ const isRenamedSinceLocked = (lockSite: LockSite, lockedSite: LockedSite): boole
 // "<id> <role>": a site moved to another file, or renumbered in its own, keeps them.
 const idAndRoleOfLockKey = (key: string): string => key.split(' ').slice(0, 2).join(' ')
 
+const fileOfLockKey = (key: string): string =>
+  key.slice(0, key.lastIndexOf('#')).split(' ').slice(2).join(' ')
+
 /*
  * Each site in the lock claims the lock line that holds its code, so a site that moved is no problem:
  *
@@ -889,8 +892,13 @@ const longBlockHintOf = (lockSite: LockSite): string => {
     : ''
 }
 
-// The words a renamed site renamed since its ack, "old → new"; null when its acked code can't be read back.
-type RenamesReader = (lockSite: LockSite, lockedSite: LockedSite) => string[] | null
+// The words a renamed site renamed since the ack of a lock line, "old → new"; null when its acked code can't be read
+// back. The key names the file and the anchor the line was acked at.
+type RenamesReader = (
+  lockSite: LockSite,
+  lockedKey: string,
+  lockedSite: LockedSite,
+) => string[] | null
 
 const checkLock = (
   lockSites: LockSite[],
@@ -917,12 +925,31 @@ const checkLock = (
     )
     return !keysOfItsIdAndRole.some((key) => claimLockLineOf(lockSite, key))
   })
+  // Its own line first; a site with none, whose file moved, takes an unclaimed line of its id and role.
+  const findRenamedLockKey = (lockSite: LockSite): string | undefined => {
+    const isRenamedOnLine = (key: string): boolean => {
+      const lockedSite = lockedSitesByKey.get(key)
+      return (
+        lockedSite !== undefined &&
+        !claimedKeys.has(key) &&
+        isRenamedSinceLocked(lockSite, lockedSite)
+      )
+    }
+    if (lockedSitesByKey.has(lockSite.key)) {
+      return isRenamedOnLine(lockSite.key) ? lockSite.key : undefined
+    }
+    return [...lockedSitesByKey.keys()].find(
+      (key) => idAndRoleOfLockKey(key) === idAndRoleOfLockKey(lockSite.key) && isRenamedOnLine(key),
+    )
+  }
   for (const lockSite of sitesNotMoved) {
     const isOwnKeyFree = lockedSitesByKey.has(lockSite.key) && !claimedKeys.has(lockSite.key)
-    const lockedSite = lockedSitesByKey.get(lockSite.key)
-    if (isOwnKeyFree && lockedSite !== undefined && isRenamedSinceLocked(lockSite, lockedSite)) {
-      claimedKeys.add(lockSite.key)
-      const renames = listRenamesOf(lockSite, lockedSite)
+    const renamedLockKey = findRenamedLockKey(lockSite)
+    const renamedLockedSite =
+      renamedLockKey === undefined ? undefined : lockedSitesByKey.get(renamedLockKey)
+    if (renamedLockKey !== undefined && renamedLockedSite !== undefined) {
+      claimedKeys.add(renamedLockKey)
+      const renames = listRenamesOf(lockSite, renamedLockKey, renamedLockedSite)
       const renamesText =
         renames === null
           ? ` (logicmap diff ${lockSite.id} shows them: no commit holds the code of its ack)`
@@ -1405,11 +1432,11 @@ const createRenamesReader = (repoRoot: string): RenamesReader => {
   }
   const ackedLinesAt = (
     commit: string,
-    lockSite: LockSite,
+    lockedKey: string,
     lockedSite: LockedSite,
   ): string[] | null => {
-    const fileLines = fileLinesAt(commit, lockSite.file)
-    const anchorLineIndex = findNthAnchorLineIndex(fileLines, lockSite.key)
+    const fileLines = fileLinesAt(commit, fileOfLockKey(lockedKey))
+    const anchorLineIndex = findNthAnchorLineIndex(fileLines, lockedKey)
     if (anchorLineIndex === null) {
       return null
     }
@@ -1418,13 +1445,20 @@ const createRenamesReader = (repoRoot: string): RenamesReader => {
       codePartOf(fingerprintCode(ackedLines)) === codePartOf(lockedSite.fingerprint)
     return isTheAckedCode ? ackedLines : null
   }
-  return (lockSite, lockedSite) => {
-    const lockLine = `${lockSite.key} ${lockedSite.version} ${lockedSite.fingerprint}`
+  return (lockSite, lockedKey, lockedSite) => {
+    const lockLine = `${lockedKey} ${lockedSite.version} ${lockedSite.fingerprint}`
     const readAtAckCommit = (): string[] | null => {
       const ackCommit = findAckCommit(repoRoot, lockedSite.file, lockLine)
-      return ackCommit === null ? null : ackedLinesAt(ackCommit, lockSite, lockedSite)
+      return ackCommit === null
+        ? null
+        : (ackedLinesAt(ackCommit, lockedKey, lockedSite) ??
+            ackedLinesAt(ackCommit, lockSite.key, lockedSite))
     }
-    const ackedLines = ackedLinesAt('HEAD', lockSite, lockedSite) ?? readAtAckCommit()
+    // The file it was acked in; else its file now, which a commit of the move and the ack together holds.
+    const ackedLines =
+      ackedLinesAt('HEAD', lockedKey, lockedSite) ??
+      ackedLinesAt('HEAD', lockSite.key, lockedSite) ??
+      readAtAckCommit()
     if (ackedLines === null) {
       return null
     }

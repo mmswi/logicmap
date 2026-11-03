@@ -54,6 +54,9 @@ The two improvements the agent proposed, each from TODO 115's evidence:
 - [x] Red: `ack --renamed` acks the ids whose lock problems are all `renamed`, and leaves an id that also has a
   `changed` site.
 - [x] Green: `ackRenamedIds`; the command line's `ack --renamed`.
+- [x] Red: a site whose file was renamed with its words reports `renamed`, its renames read from the old file; a
+  moved site with a real change stays `gone` and `unacked`.
+- [x] Green: a site with no lock line of its own takes an unclaimed line of its id and role whose shape it has.
 Files: `scripts/logicmap.ts`, `scripts/logicmap.test.ts`
 
 ### 2. `grep:` makes every reader a site
@@ -80,3 +83,7 @@ Files: `SKILL.md`, `README.md`, `scripts/logicmap.ts`
   domain acked once to `v3:`, a `grep:` on the rule of each live frame, every sender and listener anchored.
 
 ## Revisions
+- 2026-11-03, the agent (the advisor's question whether a moved site survives the v3 token): it does, the moved pass
+  compares through `isAsLocked`. But a site whose file was renamed with its words, TODO 115's `own-tags.tsx` →
+  `seen-tags.tsx`, reported `unacked`, not `renamed`: the shape was only compared on a site's own key. Step 1 gains two
+  sub-steps.
