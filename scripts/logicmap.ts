@@ -718,7 +718,7 @@ const shapePartOf = (codeToken: string): string =>
 // A JSX comment (`{/* ... */}`) counts too: among JSX children it is the only comment that stays one.
 const COMMENT_LINE_PATTERN = /^\s*(\/\/|\/\*|\*|#|--|<!--|\{\/\*)/
 const DECORATOR_LINE_PATTERN = /^\s*@/
-const CLOSING_BRACKET_LINE_PATTERN = /^\s*[)\]}]/
+const CLOSING_BRACKET_LINE_PATTERN = /^\s*[)\]}>]/
 
 const indentOf = (line: string): number => line.length - line.trimStart().length
 const isBlankLine = (line: string): boolean => line.trim() === ''
@@ -729,7 +729,7 @@ const isBlankLine = (line: string): boolean => line.trim() === ''
  *   head:  the anchor's own line when code precedes the anchor   `return null // §edge ...`
  *          otherwise the first code line below the comment, through any decorators
  *   block: every following line indented deeper than the head,
- *          plus closing-bracket lines at the head's indentation  `}`  `)`  `} else {`
+ *          plus closing-bracket lines at the head's indentation  `}`  `)`  `} else {`  `> => {`
  *          (after a closing line, a deeper line continues the statement: `}): T =>` and its body)
  */
 type AnchoredLineRange = { headLineIndex: number; lastLineIndex: number }

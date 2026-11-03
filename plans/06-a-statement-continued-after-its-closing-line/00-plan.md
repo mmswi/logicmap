@@ -29,6 +29,11 @@ the work, was never fingerprinted, under this anchor or the flow anchor above it
   after a closing `}` at the head's indentation stays outside.
 - [x] Green: `findAnchoredLineRange` keeps going after a closing line; the loop's next line decides.
 - [x] Measured on teamabled: the sites whose span grows, `check` before and after.
+- [x] Red: a return type closing on `> => {`, and a JSX opening tag closing on `>`, keep their bodies covered.
+- [x] Green: a line opening with `>` at the head's indentation is a closing line.
 Files: `scripts/logicmap.ts`, `scripts/logicmap.test.ts`
 
 ## Revisions
+- 2026-11-03, the agent (the measure on teamabled, checking each grown span): `src/documents/review.ts:66` still
+  stopped before its body: `findBaselineVersion`'s return type closes on `> => {`, and `>` was no closing line. The
+  same holds for a JSX opening tag whose attributes close on a line of its own `>`. Step 1 gains two sub-steps.

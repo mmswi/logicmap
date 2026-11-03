@@ -92,3 +92,81 @@ and acks them in its task 08, step 2.
 ## Piece 4: SKILL.md says where a span ends
 What: the anchor-grammar paragraph adds that after a closing line a deeper line continuing the statement is covered.
 Where: `SKILL.md:176-178`
+
+## Piece 5: the failing test, a generic and a JSX tag closed on `>`
+What: a test beside piece 1's: an anchor above a function whose return type closes on `> => {` and one above a JSX
+element whose attributes close on a lone `>`; an edit in the function's body, then in the element's child, is
+`changed`; the line after each stays outside.
+Why: the plan's revision: `findBaselineVersion`'s body was outside its decision's anchor.
+Where: `scripts/logicmap.test.ts`, after piece 1's test
+```ts
+  test('a generic return type or a JSX tag closed on a lone > keeps the body covered', () => {
+    const viewLines = [
+      '// §edge sync.close-during-join@1',
+      'const findBaseline = async (',
+      '  documentId: string,',
+      '): Promise<',
+      '  Version | undefined',
+      '> => {',
+      '  return loadBaseline(documentId)',
+      '}',
+      'flushPending()',
+      '',
+      'const view = (',
+      '  <section>',
+      '    {/* §edge sync.pooled-buffer-slice@1 */}',
+      '    <Button',
+      '      onClick={send}',
+      '    >',
+      '      Send',
+      '    </Button>',
+      '    <Footer />',
+      '  </section>',
+      ')',
+      '',
+    ]
+    const repoRoot = createFixtureRepo({
+      'src/view.tsx': viewLines.join('\n'),
+      'logicmap/sync.md': `${closeDuringJoinEntry(1)}\n${pooledBufferSliceEntry}`,
+    })
+    ackIds(repoRoot, ['sync.close-during-join', 'sync.pooled-buffer-slice'])
+    const replaceViewLine = (lineIndex: number, replacementLine: string): void => {
+      viewLines[lineIndex] = replacementLine
+      writeFixtureFiles(repoRoot, { 'src/view.tsx': viewLines.join('\n') })
+    }
+
+    replaceViewLine(8, 'flushPendingMessages()')
+    replaceViewLine(18, '    <Footer compact />')
+    expect(describeLockProblems(repoRoot)).toEqual([])
+
+    replaceViewLine(6, '  return loadBaseline(documentId, true)')
+    expect(describeLockProblems(repoRoot)).toEqual(['changed src/view.tsx:1'])
+
+    replaceViewLine(16, '      Send it')
+    expect(describeLockProblems(repoRoot)).toEqual(['changed src/view.tsx:1', 'changed src/view.tsx:13'])
+  })
+```
+Run (red): the function's body edit expected `['changed src/view.tsx:1']`, received `[]`.
+
+## Piece 6: a line opening with `>` closes too
+What: `CLOSING_BRACKET_LINE_PATTERN` takes `>` beside `)`, `]` and `}`; the diagram's comment names it.
+Why: `> => {` closes a generic return type and a lone `>` a JSX opening tag, as `}): T =>` closes a parameter list;
+what follows them deeper is the same statement (the revision). `/>` and `</Button>` open with `/` and `<`, so a
+self-closing tag and a closing tag at the head's indentation still end the span as before.
+Where: `scripts/logicmap.ts:721`, `:733`
+```diff
+-const CLOSING_BRACKET_LINE_PATTERN = /^\s*[)\]}]/
++const CLOSING_BRACKET_LINE_PATTERN = /^\s*[)\]}>]/
+ ...
+- *          plus closing-bracket lines at the head's indentation  `}`  `)`  `} else {`
++ *          plus closing-bracket lines at the head's indentation  `}`  `)`  `} else {`  `> => {`
+```
+Run (green): `bun test` 53 pass; strict `tsc` clean; biome clean after `--write`.
+
+## Piece 7: measured on teamabled again
+Run: `check` at `38154eb5`: errors 24, all `changed`: the 17 of piece 3, `review.ts:66` now through its body
+(66-93), and 7 more, each through its own statement: the two anchors over `DOCUMENT_PERMISSIONS_BY_ACCESS`
+(`src/documents/access.ts:31-32`), whose type closes on `> = {`, covered the type's 18 lines and none of the table's
+values (now 31-120); `DocumentSidePanel.tsx:22`'s tabs per view the same way; four JSX elements whose opening tag
+closes on a lone `>` (`AppShell.tsx:1276`, `ComposerTextarea.tsx:561`, `DocumentList.tsx:464`,
+`DocumentTitle.tsx:58`), now through their children.

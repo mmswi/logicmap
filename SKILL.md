@@ -175,7 +175,7 @@ Done when `check` exits 0 and `show <id>` lists every site you meant.
 
 An anchor covers its own line when code precedes it (`return null // §edge ...`), otherwise the first
 code line below its comment, plus everything indented under that line and the closing bracket lines
-(`}`, `} else {`, `)`) at its indentation, and after a closing line a deeper line that continues the
+(`}`, `} else {`, `)`, `> => {`) at its indentation, and after a closing line a deeper line that continues the
 statement (an arrow's body after `}): T =>`, a call chained after `})`). The fingerprint hashes that span, whitespace and comment-only
 lines left out (`//` lines, `/* */` blocks, `# ` and `-- ` lines, `<!--`), so rewording a comment asks no
 ack; a comment after code on its line counts. A code lock line holds `v3:<code>.<shape>`: that

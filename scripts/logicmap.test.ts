@@ -433,6 +433,55 @@ describe('lock', () => {
     ])
   })
 
+  test('a generic return type or a JSX tag closed on a lone > keeps the body covered', () => {
+    const viewLines = [
+      '// §edge sync.close-during-join@1',
+      'const findBaseline = async (',
+      '  documentId: string,',
+      '): Promise<',
+      '  Version | undefined',
+      '> => {',
+      '  return loadBaseline(documentId)',
+      '}',
+      'flushPending()',
+      '',
+      'const view = (',
+      '  <section>',
+      '    {/* §edge sync.pooled-buffer-slice@1 */}',
+      '    <Button',
+      '      onClick={send}',
+      '    >',
+      '      Send',
+      '    </Button>',
+      '    <Footer />',
+      '  </section>',
+      ')',
+      '',
+    ]
+    const repoRoot = createFixtureRepo({
+      'src/view.tsx': viewLines.join('\n'),
+      'logicmap/sync.md': `${closeDuringJoinEntry(1)}\n${pooledBufferSliceEntry}`,
+    })
+    ackIds(repoRoot, ['sync.close-during-join', 'sync.pooled-buffer-slice'])
+    const replaceViewLine = (lineIndex: number, replacementLine: string): void => {
+      viewLines[lineIndex] = replacementLine
+      writeFixtureFiles(repoRoot, { 'src/view.tsx': viewLines.join('\n') })
+    }
+
+    replaceViewLine(8, 'flushPendingMessages()')
+    replaceViewLine(18, '    <Footer compact />')
+    expect(describeLockProblems(repoRoot)).toEqual([])
+
+    replaceViewLine(6, '  return loadBaseline(documentId, true)')
+    expect(describeLockProblems(repoRoot)).toEqual(['changed src/view.tsx:1'])
+
+    replaceViewLine(16, '      Send it')
+    expect(describeLockProblems(repoRoot)).toEqual([
+      'changed src/view.tsx:1',
+      'changed src/view.tsx:13',
+    ])
+  })
+
   test('a trailing anchor covers its own line; an edited entry is changed; a deleted anchor is gone', () => {
     const anchoredLine =
       'const undoJoin = () => joined.removeConnection(connection) // §edge sync.close-during-join@1'
