@@ -16,3 +16,15 @@ would still tokenize 1,445 sites a run for nothing).
 Where: `scripts/logicmap.ts`: `LockSite`, `fingerprintCode`, `collectLockSites`, `isAsLocked`,
 `isRenamedSinceLocked`, `ackIds`, `createRenamesReader`
 Run: 51 pass; `check` on the worktree 0.16–0.18 s, 0 errors.
+
+## Piece 3: the measure, renames and patterns
+What, on the worktree (scratch commits, never pushed):
+- every id acked at once: 0.21 s, the 762 code lock lines `v2:` to `v3:`; `check` 0.16 s, 0 errors.
+- `personId` → `connectionId` across `src/documents/list.ts`: `renamed src/documents/list.ts:134`, "personId →
+  connectionId", 0.19 s; `ack --renamed` acked `documents.person-filter-is-places-in-common` and `check` was 0.
+- the file moved to `document-list.ts` and the name renamed back: `renamed`, "connectionId → personId", read from the
+  old path in HEAD. `inArray` → `notInArray` beside it is listed too ("inArray → notInArray"): the case only a reader
+  of the list catches. Wrapping the `where` in `and(…)` is `gone` and `unacked`; `ack --renamed` then acks nothing.
+- `grep:` on the tag, rename and membership frames' rules: each finds its sender and readers, all already anchored by
+  tasks 25, 29 and TODO 115, and the docs quoting them are left out by `logicmap/ignore`; `check` 0.19–0.22 s.
+Why: the plan's measure. The frames with no rule are teamabled's task.

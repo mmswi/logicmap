@@ -76,7 +76,7 @@ Files: `scripts/logicmap.ts`, `scripts/logicmap.test.ts`
 Files: `SKILL.md`, `README.md`, `scripts/logicmap.ts`
 
 ### 4. On teamabled
-- [ ] Measured on a teamabled worktree: a rename across anchored sites, then a change of meaning; `check`'s output,
+- [x] Measured on a teamabled worktree: a rename across anchored sites, then a change of meaning; `check`'s output,
   `ack --renamed`, the time of `check` before and after `grep:`.
 - [ ] Merged into the installed clone; its tests; the board's row.
 - [ ] Teamabled's side is its own task, `explanatory-docs/logicmap/08-renamed-sites-and-frame-readers/`: every
@@ -87,3 +87,5 @@ Files: `SKILL.md`, `README.md`, `scripts/logicmap.ts`
   compares through `isAsLocked`. But a site whose file was renamed with its words, TODO 115's `own-tags.tsx` →
   `seen-tags.tsx`, reported `unacked`, not `renamed`: the shape was only compared on a site's own key. Step 1 gains two
   sub-steps.
+- 2026-11-03, the agent (step 4's first measure on teamabled): reading every site's shape made `check` 0.23–0.25 s
+  against 0.16–0.18 s. The shape is now read only for a site whose code differs from its lock line, and by an ack.
