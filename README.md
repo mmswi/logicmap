@@ -10,7 +10,11 @@ rejected, or why a line that looks redundant is there. A logicmap records that, 
 - **ledger**: `logicmap/<domain>.md`, one entry per rule: what holds, why, what was rejected, what
   breaks, and where the claim comes from;
 - **lock**: `logicmap/<domain>.lock`, a fingerprint of the code under every defining anchor (comments
-  left out) and of every entry, so the checker knows when code changed under a rule nobody re-read.
+  left out) and of its shape, and of every entry, so the checker knows when code changed under a rule
+  nobody re-read, and tells a rename from a change.
+
+An entry can name, with `grep:`, the message its rule governs (a live frame, a job): every line that
+sends or reads it must then sit under an anchor of the rule.
 
 `SKILL.md` is the full method. `mapping-an-existing-repo.md` is the procedure for a codebase where
 nobody wrote the reasons down.
@@ -45,6 +49,7 @@ logicmap.ts show <id>                    one rule in full and every site, with t
 logicmap.ts show <file>[:<line>[-<line>]]  the rules in a file, or covering those lines
 logicmap.ts check                        every disagreement; exits 1 on any error
 logicmap.ts ack <id>...                  record that you re-read these rules against their code
+logicmap.ts ack --renamed                ack every rule whose code only had words renamed, once you read them
 logicmap.ts diff <id>                    what changed under the id's sites since their last ack
 logicmap.ts why <file>:<line>[-<line>]   the rules over the lines, then every commit that changed them,
                                          newest first, with the piece and the goal recorded with each

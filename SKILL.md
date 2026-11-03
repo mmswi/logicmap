@@ -24,6 +24,7 @@ The checker, run from anywhere inside the repo:
 ```
 bun ~/.claude/skills/logicmap/scripts/logicmap.ts check
 bun ~/.claude/skills/logicmap/scripts/logicmap.ts ack <id>...
+bun ~/.claude/skills/logicmap/scripts/logicmap.ts ack --renamed
 bun ~/.claude/skills/logicmap/scripts/logicmap.ts show [<domain> | <id> | <file>[:<line>[-<line>]]]
 bun ~/.claude/skills/logicmap/scripts/logicmap.ts diff <id>
 bun ~/.claude/skills/logicmap/scripts/logicmap.ts why <file>:<line>[-<line>] | <file>:<name> | <id>
@@ -94,8 +95,19 @@ After every edit to anchored code, run `check` and resolve each line it prints:
     `history:` line; move the definition anchor's pin to `@N+1`. `check` now reports every other site as
     `stale-pin`: open each, re-verify it against the new entry, fix the code if needed, move its pin.
     Then `ack <id>`.
+- `renamed`: the code changed only by words renamed one for one; the message lists them, `old → new`
+  (`diff <id>` shows them when no commit holds the acked code). Read the list. Each new name for the same
+  thing → `ack --renamed`, which acks every id whose only errors are renames. A new name that points at
+  another thing (a call to another function, a field of another object) is a change: read the entry as
+  for `changed`. Text in JSX, a regular expression's body, a comment after code and a template literal
+  over several lines are read as words too, so a reworded message there is listed as a rename: the list
+  is where it shows.
 - Moved code: the anchors move with it. A site whose code is as it was acked, in another file or under
-  another number, is no problem; `ack <id>` rewrites its key. Moved and edited, it is `unacked`.
+  another number, is no problem; `ack <id>` rewrites its key. Moved and renamed, it is `renamed`; moved
+  and otherwise edited, `unacked`.
+- `unanchored-match`: the line has what the entry's `grep:` looks for and lies under none of its
+  anchors. When it sends or reads what the rule governs, read the rule against it and anchor it (`uses`,
+  `test` in a test); when the pattern caught something else, narrow the pattern.
 - Deleted logic: delete its anchors, set `status: retired` with a `history:` line saying why, `ack <id>`
   (which also drops the `gone` lock lines). A retired id is never reused.
 - Any other error names its fix in the message (`orphan-entry`, `duplicate-definition`,
@@ -119,7 +131,10 @@ An anchor earns its place when at least one holds:
 - code looks redundant or wrong but is right → `edge`;
 - a reasonable alternative was rejected and an agent could bring it back → `decision`;
 - a process crosses files or processes where no call graph follows it (HTTP, websocket, queue, event,
-  cron) → `flow`, one anchor per step.
+  cron) → `flow`, one anchor per step;
+- a message crosses processes and every sender and reader must agree on it (a live frame, a job, a key
+  mirrored across a boundary) → its rule gets a `grep:` that matches the message's name, and every line
+  naming it is a site: `check` reports the ones under no anchor of the rule.
 
 Grep already finds the callers of a function by its name; anchors carry the links grep cannot see.
 Most files need none; the few files where rules and flows meet carry several.
@@ -162,16 +177,20 @@ An anchor covers its own line when code precedes it (`return null // §edge ...`
 code line below its comment, plus everything indented under that line and the closing bracket lines
 (`}`, `} else {`, `)`) at its indentation. The fingerprint hashes that span, whitespace and comment-only
 lines left out (`//` lines, `/* */` blocks, `# ` and `-- ` lines, `<!--`), so rewording a comment asks no
-ack; a comment after code on its line counts. Lock lines taken so start with `v2:`. A line without it was
-taken with the comments and is compared that way; an ack renews such lines of its domain whose code is
-still as locked, so nothing is acked unread.
+ack; a comment after code on its line counts. A code lock line holds `v3:<code>.<shape>`: that
+fingerprint, and the fingerprint of the code's shape, every word that isn't a keyword replaced by its
+order of first appearance, so a rename one for one keeps the shape. A `v2:` line has no shape, and a line
+with no prefix was taken with the comments; an ack renews such lines of its domain whose code is still as
+locked, so nothing is acked unread.
 
 `check` enforces: each `decision`, `invariant` and `edge` id has exactly one defining anchor; each flow
 step has at least one site unless marked `(external)`; every anchor pins the entry's version; the role
 matches the entry's kind; retired ids have no anchors; every active entry has a site; every defining
-anchor's and entry's fingerprint matches the lock. It warns when an `edge` or `invariant` has no `test`
-anchor and no `untested:` field, and when the first sentence of an active entry's `what` is over 200
-characters (`long-what`).
+anchor's and entry's fingerprint matches the lock; every line an active entry's `grep:` finds, comment
+lines left out, lies under an anchor of that entry. It warns when an `edge` or `invariant` has no `test`
+anchor and no `untested:` field, when the first sentence of an active entry's `what` is over 200
+characters (`long-what`), when git has no PCRE and the `grep:` fields go unchecked
+(`grep-unavailable`), and when git finds a line no pattern matches in JavaScript (`grep-mismatch`).
 
 ## Ledger entry
 
@@ -199,7 +218,10 @@ history:
   `recorded` beside every entry.
 - Optional: `rejected` (alternative → why not), `breaks-if`, `revisit-if` (the condition that reopens
   it), `untested` (why no test proves this `edge` or `invariant`: a timing no test can stop at, a check
-  only a person in a browser can make), `status` (`active` default, or `retired`), `history`.
+  only a person in a browser can make), `grep` (a pattern for the lines that send or read what the rule
+  governs, written in the syntax PCRE and JavaScript share, such as
+  `\b(CLIENT_)?LIVE_EVENT_TYPES\.tagChanged\b`; it needs git built with PCRE), `status` (`active`
+  default, or `retired`), `history`.
 - Flow entries add `steps:`, one `N. text` line per step; append `(external)` to a step with no code in
   this repo (a user clicking an email link).
 - A line indented under a field continues it. The file is `logicmap/<domain>.md`; the heading is the id.
@@ -228,6 +250,10 @@ a plan file in the repo, and the plan names the rules each step touches.
      sites `show <id>` prints: the step re-verifies each one;
    - `creates`: a new rule; pick its id and kind now;
    - `retires`: logic the step deletes.
+
+   A step that holds another process's data (a store, a cache, a list read once) names the messages
+   that change that data and `show`s their rules: a rule with a `grep:` lists every sender and reader,
+   and the step's code becomes one more reader, anchored. A message with no such rule gets one.
 
    A rule the step relies on that has no entry yet gets a sub-step that maps it. A plan writes ids,
    never anchors (`access.not-found-not-forbidden@1`, not the `§<role>` form): outside `logicmap/`, a
@@ -360,7 +386,9 @@ the hook names, and `check` before a commit.
      each id you touch (its entry and every anchored site, flow steps in order).
    - After editing: `logicmap check`, and resolve each line it prints (`logicmap diff <id>` shows what
      changed under its sites): `logicmap ack <id>` when the entry still holds; when its meaning changed, bump the entry's `version`, re-verify every site `check` then
-     reports as `stale-pin`, move those pins, and ack.
+     reports as `stale-pin`, move those pins, and ack. `renamed` lists the words renamed: when none now
+     points at another thing, `logicmap ack --renamed`. `unanchored-match` is a line naming what a rule's
+     `grep:` looks for, under no anchor of the rule: anchor it.
    - Roles: `decision`, `invariant`, `edge`, `flow` define a rule; `uses`, `test` point at one. Files
      that only talk about anchors go in `logicmap/ignore`. The full method: the `logicmap` skill.
    - Why code is as it is: `logicmap why <file>:<line>` (or `<file>:<start>-<end>`, `<file>:<name>`, `<id>`):

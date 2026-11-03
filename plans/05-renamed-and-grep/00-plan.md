@@ -70,7 +70,7 @@ Files: `scripts/logicmap.ts`, `scripts/logicmap.test.ts`
 Files: `scripts/logicmap.ts`, `scripts/logicmap.test.ts`
 
 ### 3. The docs
-- [ ] SKILL.md: `renamed` and `ack --renamed` in "Changing anchored code"; `grep:` in the entry's optional fields,
+- [x] SKILL.md: `renamed` and `ack --renamed` in "Changing anchored code"; `grep:` in the entry's optional fields,
   in "Adding anchors" (a message type crossing a process) and in what `check` enforces; the planning rule in
   "Working a task in a mapped repo"; the USAGE line; README.
 Files: `SKILL.md`, `README.md`, `scripts/logicmap.ts`
