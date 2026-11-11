@@ -345,7 +345,14 @@ Rules:
   recorded with it, and the `why` command for them;
 - after an `Edit`, `MultiEdit` or `Write`, the errors `check` reports in that file, with what to do, and
   the rules whose `uses` or `test` sites cover the lines changed since HEAD, once per file and session;
-- at `Stop`, `check`'s errors, once, for a session that edited a file in the repo since its last stop:
+- after a Bash command, whether it succeeded or failed, both of the above: each `sed -n <first>,<last>p <file>`
+  or `cat <file>` in it is answered as a `Read` of those lines, from the directory the command stands in (its
+  `cd`s followed), and each file it changed, written during its run and differing from HEAD, as an edit. Reading
+  with `sed` and writing with a script keep the map in front of the agent as `Read` and `Edit` do; a `grep`, or a
+  range written with shell variables, is not a read;
+- after a compaction, what the session was shown once (a rule in full, a file's newest change, a rule relied
+  on) is shown again;
+- at `Stop`, `check`'s errors, once, for a session that changed a file in the repo since its last stop:
   the agent resolves them, or tells the user why they stay. A session that only read is not asked, so one
   session's work in progress does not stop the others.
 
@@ -356,7 +363,14 @@ Install it once, in `~/.claude/settings.json` (merge into the `hooks` already th
   "hooks": {
     "PostToolUse": [
       { "matcher": "Read", "hooks": [{ "type": "command", "command": "bun ~/.claude/skills/logicmap/scripts/hook.ts", "timeout": 30 }] },
-      { "matcher": "Edit|MultiEdit|Write", "hooks": [{ "type": "command", "command": "bun ~/.claude/skills/logicmap/scripts/hook.ts", "timeout": 30 }] }
+      { "matcher": "Edit|MultiEdit|Write", "hooks": [{ "type": "command", "command": "bun ~/.claude/skills/logicmap/scripts/hook.ts", "timeout": 30 }] },
+      { "matcher": "Bash", "hooks": [{ "type": "command", "command": "bun ~/.claude/skills/logicmap/scripts/hook.ts", "timeout": 30 }] }
+    ],
+    "PostToolUseFailure": [
+      { "matcher": "Bash", "hooks": [{ "type": "command", "command": "bun ~/.claude/skills/logicmap/scripts/hook.ts", "timeout": 30 }] }
+    ],
+    "PostCompact": [
+      { "hooks": [{ "type": "command", "command": "bun ~/.claude/skills/logicmap/scripts/hook.ts", "timeout": 30 }] }
     ],
     "Stop": [
       { "hooks": [{ "type": "command", "command": "bun ~/.claude/skills/logicmap/scripts/hook.ts", "timeout": 30 }] }
@@ -364,6 +378,10 @@ Install it once, in `~/.claude/settings.json` (merge into the `hooks` already th
   }
 }
 ```
+
+A Bash command that exits non-zero fires `PostToolUseFailure` only, which is why the hook is installed on both.
+A command that reads and changes nothing costs one `git status`; the repo is analysed only when a file was read or
+changed.
 
 The hook adds to what the protocol asks; it does not replace it. Run `show <id>` before relying on a rule
 the hook names, and `check` before a commit.

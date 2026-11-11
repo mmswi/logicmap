@@ -7,6 +7,7 @@ import {
   readdirSync,
   renameSync,
   rmSync,
+  utimesSync,
   writeFileSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -2153,5 +2154,187 @@ describe('hook', () => {
         tool_input: { file_path: join(plainRepoRoot, 'src/plain.ts') },
       }),
     ).toBeNull()
+  })
+
+  test('after a Bash command, succeeded or failed, the errors of each file it changed, once, and the stop check armed', () => {
+    const repoRoot = createMappedRepo()
+    commitFixtureRepo(repoRoot, 'wip: the join')
+    const sessionId = `editing-${crypto.randomUUID()}`
+    const outputOfBash = (hookEventName: string) => {
+      const hookOutput = respondToHook({
+        hook_event_name: hookEventName,
+        session_id: sessionId,
+        cwd: repoRoot,
+        tool_name: 'Bash',
+        tool_input: { command: 'python3 rewrite-room.py' },
+        duration_ms: 40,
+      })
+      return hookOutput !== null && 'hookSpecificOutput' in hookOutput
+        ? hookOutput.hookSpecificOutput
+        : null
+    }
+    const rewriteRoom = (from: string, to: string): void =>
+      writeFixtureFiles(repoRoot, {
+        'src/room.ts': readFixtureFile(repoRoot, 'src/room.ts').replace(from, to),
+      })
+
+    expect(outputOfBash('PostToolUse')).toBeNull()
+
+    rewriteRoom('removeConnection(connection)', 'removeConnection(connection, true)')
+    const succeededOutput = outputOfBash('PostToolUse')
+    expect(succeededOutput?.hookEventName).toBe('PostToolUse')
+    expect(succeededOutput?.additionalContext).toContain('src/room.ts:2: error changed')
+    expect(outputOfBash('PostToolUse')).toBeNull()
+
+    rewriteRoom('connection, true', 'connection, false')
+    const failedOutput = outputOfBash('PostToolUseFailure')
+    expect(failedOutput?.hookEventName).toBe('PostToolUseFailure')
+    expect(failedOutput?.additionalContext).toContain('src/room.ts:2: error changed')
+
+    expect(
+      respondToHook({ hook_event_name: 'Stop', session_id: sessionId, cwd: repoRoot }),
+    ).toMatchObject({ decision: 'block' })
+  })
+
+  test('a Bash command answers for what it changed: not a file written before it ran, not one an Edit was answered for', () => {
+    const repoRoot = createMappedRepo()
+    commitFixtureRepo(repoRoot, 'wip: the join')
+    const roomPath = join(repoRoot, 'src/room.ts')
+    const rewriteRoom = (from: string, to: string): void =>
+      writeFixtureFiles(repoRoot, {
+        'src/room.ts': readFixtureFile(repoRoot, 'src/room.ts').replace(from, to),
+      })
+    const outputOfBash = (sessionId: string, cwd: string, durationMs: number | undefined) =>
+      respondToHook({
+        hook_event_name: 'PostToolUse',
+        session_id: sessionId,
+        cwd,
+        tool_name: 'Bash',
+        tool_input: { command: 'bun test' },
+        duration_ms: durationMs,
+      })
+
+    rewriteRoom('removeConnection(connection)', 'removeConnection(connection, true)')
+    const aMinuteAgo = new Date(Date.now() - 60_000)
+    utimesSync(roomPath, aMinuteAgo, aMinuteAgo)
+    const laterSessionId = `later-${crypto.randomUUID()}`
+    expect(outputOfBash(laterSessionId, repoRoot, 40)).toBeNull()
+    expect(
+      respondToHook({ hook_event_name: 'Stop', session_id: laterSessionId, cwd: repoRoot }),
+    ).toBeNull()
+    expect(
+      JSON.stringify(outputOfBash(`untimed-${crypto.randomUUID()}`, repoRoot, undefined)),
+    ).toContain('src/room.ts:2: error changed')
+
+    const editingSessionId = `editing-${crypto.randomUUID()}`
+    rewriteRoom('connection, true', 'connection, false')
+    const editOutput = respondToHook({
+      hook_event_name: 'PostToolUse',
+      session_id: editingSessionId,
+      tool_name: 'Edit',
+      tool_input: { file_path: roomPath },
+    })
+    expect(JSON.stringify(editOutput)).toContain('src/room.ts:2: error changed')
+    expect(outputOfBash(editingSessionId, repoRoot, 40)).toBeNull()
+
+    const plainRepoRoot = createFixtureRepo({ 'src/plain.ts': 'export const plain = 1\n' })
+    expect(outputOfBash(`plain-${crypto.randomUUID()}`, plainRepoRoot, 40)).toBeNull()
+  })
+
+  test('after a Bash command that prints lines with sed or cat, the rules covering them, from where the command stands', () => {
+    const repoRoot = createMappedRepo()
+    const plainRepoRoot = createFixtureRepo({ 'src/plain.ts': 'export const plain = 1\n' })
+    const sessionId = `reading-${crypto.randomUUID()}`
+    const contextOfCommand = (command: string, cwd = repoRoot, commandSessionId = sessionId) => {
+      const hookOutput = respondToHook({
+        hook_event_name: 'PostToolUse',
+        session_id: commandSessionId,
+        cwd,
+        tool_name: 'Bash',
+        tool_input: { command },
+        duration_ms: 12,
+      })
+      return hookOutput !== null && 'hookSpecificOutput' in hookOutput
+        ? hookOutput.hookSpecificOutput.additionalContext
+        : null
+    }
+    const fullRuleText = [
+      'logicmap: the rules covering src/room.ts (logicmap show <id> for the full entry):',
+      'sync.close-during-join@1  edge  recorded  The socket can close while the join is loading.',
+      '  2-5  §edge  ok',
+    ].join('\n')
+    const namedRuleText =
+      'logicmap: these lines of src/room.ts are covered too by rules shown earlier this session: sync.close-during-join@1'
+
+    expect(contextOfCommand('sed -n 2,5p src/room.ts')).toBe(fullRuleText)
+    expect(contextOfCommand("sed -n '4p' src/room.ts | cut -c1-80")).toBe(namedRuleText)
+    expect(contextOfCommand('git status --short && cat src/room.ts')).toBe(namedRuleText)
+    expect(contextOfCommand('cd src && sed -n "1,3p" room.ts; echo done')).toBe(namedRuleText)
+    expect(contextOfCommand('sed -n 1,3p room.ts', join(repoRoot, 'src'))).toBe(namedRuleText)
+
+    expect(contextOfCommand('sed -n 6,7p src/room.ts')).toBeNull()
+    expect(contextOfCommand('sed -n "$first,$((first + 3))p" src/room.ts')).toBeNull()
+    expect(contextOfCommand('sed -n 1,3p src/gone.ts')).toBeNull()
+    expect(contextOfCommand('grep -n closedEarly src/room.ts')).toBeNull()
+
+    const elsewhereSessionId = `elsewhere-${crypto.randomUUID()}`
+    expect(
+      contextOfCommand(
+        `cd ${repoRoot} && sed -n 2,5p src/room.ts`,
+        plainRepoRoot,
+        elsewhereSessionId,
+      ),
+    ).toBe(fullRuleText)
+    writeFixtureFiles(repoRoot, {
+      'src/room.ts': readFixtureFile(repoRoot, 'src/room.ts').replace(
+        'removeConnection(connection)',
+        'removeConnection(connection, true)',
+      ),
+    })
+    expect(
+      contextOfCommand(
+        `cd ${repoRoot} && python3 rewrite-room.py`,
+        plainRepoRoot,
+        elsewhereSessionId,
+      ),
+    ).toContain('src/room.ts:2: error changed')
+  })
+
+  test('after a compaction, a rule shown before is shown in full again; the stop check stays armed', () => {
+    const repoRoot = createMappedRepo()
+    const roomPath = join(repoRoot, 'src/room.ts')
+    const sessionId = `compacted-${crypto.randomUUID()}`
+    const contextOfRead = (): string =>
+      JSON.stringify(
+        respondToHook({
+          hook_event_name: 'PostToolUse',
+          session_id: sessionId,
+          tool_name: 'Read',
+          tool_input: { file_path: roomPath },
+        }),
+      )
+    const fullRuleText = 'sync.close-during-join@1  edge  recorded  The socket can close'
+    writeFixtureFiles(repoRoot, {
+      'src/room.ts': readFixtureFile(repoRoot, 'src/room.ts').replace(
+        'removeConnection(connection)',
+        'removeConnection(connection, true)',
+      ),
+    })
+    respondToHook({
+      hook_event_name: 'PostToolUse',
+      session_id: sessionId,
+      tool_name: 'Edit',
+      tool_input: { file_path: roomPath },
+    })
+
+    expect(contextOfRead()).toContain(fullRuleText)
+    expect(contextOfRead()).not.toContain(fullRuleText)
+    expect(
+      respondToHook({ hook_event_name: 'PostCompact', session_id: sessionId, cwd: repoRoot }),
+    ).toBeNull()
+    expect(contextOfRead()).toContain(fullRuleText)
+    expect(
+      respondToHook({ hook_event_name: 'Stop', session_id: sessionId, cwd: repoRoot }),
+    ).toMatchObject({ decision: 'block' })
   })
 })

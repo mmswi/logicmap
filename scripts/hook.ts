@@ -1,19 +1,27 @@
 import { execFileSync } from 'node:child_process'
-import { appendFileSync, existsSync, mkdirSync, readFileSync, realpathSync, rmSync } from 'node:fs'
-import { tmpdir } from 'node:os'
-import { dirname, join, relative, sep } from 'node:path'
+import {
+  appendFileSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  statSync,
+} from 'node:fs'
+import { homedir, tmpdir } from 'node:os'
+import { dirname, join, relative, resolve, sep } from 'node:path'
 import {
   LEDGER_DIRECTORY,
   type LineRange,
+  type MapReader,
   type NewestLinesChange,
   PROBLEM_SEVERITIES,
   type Problem,
   type RuleSection,
   checkRepo,
+  createMapReader,
   findNewestLinesChange,
   formatProblem,
-  inspectEdit,
-  listRuleSectionsInLines,
 } from './logicmap.ts'
 
 /*
@@ -26,6 +34,10 @@ import {
  *   PostToolUse Edit / MultiEdit / Write  → what check reports for the edited file's rules; and the rules
  *                                           whose uses or test sites cover lines changed since HEAD, which
  *                                           no lock fingerprints, once per file and session
+ *   PostToolUse / PostToolUseFailure Bash → both of the above for a shell command: each `sed -n A,Bp <file>`
+ *                                           or `cat <file>` in it is a read of those lines, and each file it
+ *                                           changed (written during its run, differing from HEAD) is an edit
+ *   PostCompact                           → what the session was shown once is forgotten, so it is shown again
  *   Stop                                  → check's errors, once, so the agent resolves them or says
  *                                           why they stay; only for a session that edited the repo
  *                                           since its last stop
@@ -33,9 +45,15 @@ import {
  * It answers only inside a git repo that has a logicmap/ folder; anywhere else it prints nothing.
  */
 
-export const HOOK_EVENTS = { postToolUse: 'PostToolUse', stop: 'Stop' } as const
+export const HOOK_EVENTS = {
+  postToolUse: 'PostToolUse',
+  postToolUseFailure: 'PostToolUseFailure',
+  postCompact: 'PostCompact',
+  stop: 'Stop',
+} as const
 
 const READ_TOOL_NAME = 'Read'
+const BASH_TOOL_NAME = 'Bash'
 const EDITING_TOOL_NAMES: readonly string[] = ['Edit', 'MultiEdit', 'Write']
 
 // The fields of Claude Code's hook input this hook reads.
@@ -44,17 +62,20 @@ export type HookInput = {
   session_id?: string
   cwd?: string
   tool_name?: string
-  tool_input?: { file_path?: unknown; offset?: unknown; limit?: unknown }
+  tool_input?: { file_path?: unknown; offset?: unknown; limit?: unknown; command?: unknown }
+  duration_ms?: number
   stop_hook_active?: boolean
 }
 
+// The events of a tool call, whose answer is context added for the agent. A Bash command that exits non-zero
+// fires the failure event only.
+type ToolHookEventName = typeof HOOK_EVENTS.postToolUse | typeof HOOK_EVENTS.postToolUseFailure
+
+const isToolHookEventName = (hookEventName: string): hookEventName is ToolHookEventName =>
+  hookEventName === HOOK_EVENTS.postToolUse || hookEventName === HOOK_EVENTS.postToolUseFailure
+
 export type HookOutput =
-  | {
-      hookSpecificOutput: {
-        hookEventName: typeof HOOK_EVENTS.postToolUse
-        additionalContext: string
-      }
-    }
+  | { hookSpecificOutput: { hookEventName: ToolHookEventName; additionalContext: string } }
   | { decision: 'block'; reason: string }
 
 // A stop reason lists this many errors at most; the rest are counted.
@@ -86,6 +107,8 @@ const namedChangesFileOf = (sessionId: string): string =>
   sessionFileOf(sessionId, '.named-changes.txt')
 const reliedOnRulesFileOf = (sessionId: string): string =>
   sessionFileOf(sessionId, '.relied-on-rules.txt')
+const inspectedEditsFileOf = (sessionId: string): string =>
+  sessionFileOf(sessionId, '.inspected-edits.txt')
 
 const appendToSessionFile = (sessionFile: string, lines: string[]): void => {
   mkdirSync(SESSION_FILES_DIRECTORY, { recursive: true })
@@ -110,9 +133,10 @@ const takeEditedRepos = (sessionId: string): Set<string> => {
 const toRepoPath = (repoRoot: string, absolutePath: string): string =>
   relative(repoRoot, realpathSync(absolutePath)).split(sep).join('/')
 
-const addContext = (additionalContext: string): HookOutput => ({
-  hookSpecificOutput: { hookEventName: HOOK_EVENTS.postToolUse, additionalContext },
-})
+const addContext = (hookEventName: ToolHookEventName, contextLines: string[]): HookOutput | null =>
+  contextLines.length === 0
+    ? null
+    : { hookSpecificOutput: { hookEventName, additionalContext: contextLines.join('\n') } }
 
 // Read's offset is the first line read and limit the number of lines; neither means the whole file.
 const toReadLines = (offset: unknown, limit: unknown): LineRange | null => {
@@ -134,6 +158,18 @@ const readSessionFileLines = (sessionFile: string): Set<string> =>
   existsSync(sessionFile)
     ? new Set(readFileSync(sessionFile, 'utf8').split('\n').filter(Boolean))
     : new Set()
+
+// What a session was shown once is gone from its context after a compaction, so it is shown again.
+const forgetWhatSessionWasShown = (sessionId: string): void => {
+  const shownOnceFiles = [
+    shownRulesFileOf(sessionId),
+    namedChangesFileOf(sessionId),
+    reliedOnRulesFileOf(sessionId),
+  ]
+  for (const shownOnceFile of shownOnceFiles) {
+    rmSync(shownOnceFile, { force: true })
+  }
+}
 
 // A commit subject is cut here: teamabled's run to 300 characters.
 const NAMED_SUBJECT_MAX_LENGTH = 100
@@ -190,23 +226,15 @@ const listNewestChangeLines = (
 // Each rule in full the first time this session reads its lines, then by id in one line, so the agent
 // still sees which rules cover what it reads after its context was compacted. Without a session id (an
 // older Claude Code), every read shows them in full.
-const respondToRead = (
-  filePath: string,
-  offset: unknown,
-  limit: unknown,
+const describeRead = (
+  mapReader: MapReader,
+  repoRoot: string,
+  file: string,
+  readLines: LineRange | null,
   sessionId: string | null,
-): HookOutput | null => {
-  const repoRoot = findMappedRepoRoot(dirname(filePath))
-  if (repoRoot === null) {
-    return null
-  }
-  const file = toRepoPath(repoRoot, filePath)
-  const readLines = toReadLines(offset, limit)
-  const ruleSections = listRuleSectionsInLines(repoRoot, file, readLines)
+): string[] => {
+  const ruleSections = mapReader.listRuleSectionsInLines(file, readLines)
   const newestChangeLines = listNewestChangeLines(repoRoot, file, readLines, sessionId)
-  if (ruleSections.length === 0 && newestChangeLines.length === 0) {
-    return null
-  }
   const shownRuleLines =
     sessionId === null ? new Set<string>() : readSessionFileLines(shownRulesFileOf(sessionId))
   const isShownBefore = (ruleSection: RuleSection): boolean =>
@@ -234,7 +262,25 @@ const respondToRead = (
           `logicmap: the rules covering ${file} (logicmap show <id> for the full entry):`,
           ...newRuleSections.map((ruleSection) => ruleSection.text),
         ]
-  return addContext([...newRulesLines, ...shownBeforeLines, ...newestChangeLines].join('\n'))
+  return [...newRulesLines, ...shownBeforeLines, ...newestChangeLines]
+}
+
+const respondToRead = (
+  filePath: string,
+  offset: unknown,
+  limit: unknown,
+  sessionId: string | null,
+): HookOutput | null => {
+  const repoRoot = findMappedRepoRoot(dirname(filePath))
+  if (repoRoot === null) {
+    return null
+  }
+  const file = toRepoPath(repoRoot, filePath)
+  const readLines = toReadLines(offset, limit)
+  return addContext(
+    HOOK_EVENTS.postToolUse,
+    describeRead(createMapReader(repoRoot), repoRoot, file, readLines, sessionId),
+  )
 }
 
 // A problem belongs to the edited file when it sits there, or when a lock line of that file is gone.
@@ -266,6 +312,73 @@ const listChangedLineRanges = (repoRoot: string, file: string): LineRange[] => {
     return []
   }
 }
+
+// A status entry of git status --porcelain is two status letters, a space, then the path.
+const STATUS_ENTRY_PATH_START = 3
+
+// The hook starts after the command ended, so the run is taken this much longer back: a file written in the
+// command's first moments still falls inside it.
+const COMMAND_RUN_SLACK_MS = 5000
+
+type ChangedFile = { file: string; modifiedAtMs: number }
+
+// The files that differ from HEAD or that git doesn't track yet, each with when it was last written. A deleted
+// file has no such time and is left out. None when git fails.
+const listFilesChangedSinceHead = (repoRoot: string): ChangedFile[] => {
+  try {
+    return execFileSync(
+      'git',
+      [
+        '--no-optional-locks',
+        'status',
+        '--porcelain',
+        '-z',
+        '--no-renames',
+        '--untracked-files=all',
+      ],
+      { cwd: repoRoot, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] },
+    )
+      .split('\0')
+      .filter(Boolean)
+      .flatMap((statusEntry) => {
+        const file = statusEntry.slice(STATUS_ENTRY_PATH_START)
+        const modifiedAtMs = statSync(join(repoRoot, file), { throwIfNoEntry: false })?.mtimeMs
+        return modifiedAtMs === undefined ? [] : [{ file, modifiedAtMs }]
+      })
+  } catch {
+    return []
+  }
+}
+
+const inspectedEditLineOf = (repoRoot: string, { file, modifiedAtMs }: ChangedFile): string =>
+  `${repoRoot} ${file} ${modifiedAtMs}`
+
+// The files a command changed: written during its run, and not answered for yet as they are now. An input with
+// no duration (an older Claude Code) gives no run to compare with, so every changed file counts.
+const listFilesChangedByCommand = (
+  repoRoot: string,
+  durationMs: number | undefined,
+  sessionId: string | null,
+): ChangedFile[] => {
+  const runStartMs = durationMs === undefined ? 0 : Date.now() - durationMs - COMMAND_RUN_SLACK_MS
+  const inspectedEditLines =
+    sessionId === null ? new Set<string>() : readSessionFileLines(inspectedEditsFileOf(sessionId))
+  return listFilesChangedSinceHead(repoRoot).filter(
+    (changedFile) =>
+      changedFile.modifiedAtMs >= runStartMs &&
+      !inspectedEditLines.has(inspectedEditLineOf(repoRoot, changedFile)),
+  )
+}
+
+const recordInspectedEdits = (
+  sessionId: string,
+  repoRoot: string,
+  changedFiles: ChangedFile[],
+): void =>
+  appendToSessionFile(
+    inspectedEditsFileOf(sessionId),
+    changedFiles.map((changedFile) => inspectedEditLineOf(repoRoot, changedFile)),
+  )
 
 const reliedOnRuleLineOf = (repoRoot: string, file: string, ruleSection: RuleSection): string =>
   `${repoRoot} ${file} ${ruleSection.id}@${ruleSection.version ?? '?'}`
@@ -303,23 +416,21 @@ const listReliedOnRuleLines = (
   ]
 }
 
-const respondToEdit = (filePath: string, sessionId: string | null): HookOutput | null => {
-  const repoRoot = findMappedRepoRoot(dirname(filePath))
-  if (repoRoot === null) {
-    return null
-  }
-  if (sessionId !== null) {
-    recordEditedRepo(sessionId, repoRoot)
-  }
-  const file = toRepoPath(repoRoot, filePath)
-  const { problems, referringRuleSections } = inspectEdit(
-    repoRoot,
-    file,
-    listChangedLineRanges(repoRoot, file),
-  )
-  const fileErrors = problems.filter(
+// What an edit left to do in its file: the errors check reports there, and the rules relied on over its changed
+// lines. A file with no anchors has no such rule, so git is not asked for its changed lines.
+const describeEdit = (
+  mapReader: MapReader,
+  repoRoot: string,
+  file: string,
+  sessionId: string | null,
+): string[] => {
+  const fileErrors = mapReader.problems.filter(
     (problem) => problem.severity === PROBLEM_SEVERITIES.error && isProblemOfFile(problem, file),
   )
+  const changedLineRanges = mapReader.isAnchoredFile(file)
+    ? listChangedLineRanges(repoRoot, file)
+    : []
+  const referringRuleSections = mapReader.listReferringRuleSections(file, changedLineRanges)
   const reliedOnRuleLines = listReliedOnRuleLines(
     repoRoot,
     file,
@@ -327,9 +438,6 @@ const respondToEdit = (filePath: string, sessionId: string | null): HookOutput |
     fileErrors,
     sessionId,
   )
-  if (fileErrors.length === 0 && reliedOnRuleLines.length === 0) {
-    return null
-  }
   const errorLines =
     fileErrors.length === 0
       ? []
@@ -337,7 +445,154 @@ const respondToEdit = (filePath: string, sessionId: string | null): HookOutput |
           `logicmap: the edit to ${file} left the map out of step with the code. Re-read each entry (logicmap show <id>), then ack it if it still holds, or bump its version if its meaning changed:`,
           ...fileErrors.map(formatProblem),
         ]
-  return addContext([...errorLines, ...reliedOnRuleLines].join('\n'))
+  return [...errorLines, ...reliedOnRuleLines]
+}
+
+const respondToEdit = (filePath: string, sessionId: string | null): HookOutput | null => {
+  const repoRoot = findMappedRepoRoot(dirname(filePath))
+  if (repoRoot === null) {
+    return null
+  }
+  const file = toRepoPath(repoRoot, filePath)
+  if (sessionId !== null) {
+    recordEditedRepo(sessionId, repoRoot)
+    recordInspectedEdits(sessionId, repoRoot, [{ file, modifiedAtMs: statSync(filePath).mtimeMs }])
+  }
+  return addContext(
+    HOOK_EVENTS.postToolUse,
+    describeEdit(createMapReader(repoRoot), repoRoot, file, sessionId),
+  )
+}
+
+// A command that changes many files is told this many lines at most; check lists the rest.
+const BASH_CONTEXT_MAX_LINES = 40
+
+const COMMAND_SEPARATOR_PATTERN = /&&|\|\||[;|\n]/
+const QUOTED_WORD_PATTERN = /^(['"])(.*)\1$/
+// The lines sed -n prints: `40,60p`, or `40p` for one line.
+const SED_PRINTED_LINES_PATTERN = /^(\d+)(?:,(\d+))?p$/
+const HOME_PATH_START = '~/'
+
+type CommandRead = { filePath: string; readLines: LineRange | null }
+
+const toAbsolutePath = (directory: string, typedPath: string): string =>
+  typedPath.startsWith(HOME_PATH_START)
+    ? join(homedir(), typedPath.slice(HOME_PATH_START.length))
+    : resolve(directory, typedPath)
+
+// The directories a command stands in, the session's first and then each `cd` target, and the files it prints with
+// `sed -n` or `cat`, each from the directory it stands in at that point.
+const walkCommand = (
+  command: string,
+  cwd: string,
+): { directories: string[]; reads: CommandRead[] } => {
+  const directories = [cwd]
+  const reads: CommandRead[] = []
+  for (const segment of command.split(COMMAND_SEPARATOR_PATTERN)) {
+    const [program, ...programArguments] = segment
+      .trim()
+      .split(/\s+/)
+      .map((shellWord) => shellWord.replace(QUOTED_WORD_PATTERN, '$2'))
+    const currentDirectory = directories.at(-1) ?? cwd
+    const [firstArgument = '', secondArgument = '', thirdArgument = ''] = programArguments
+    const [, firstLineText, lastLineText = firstLineText] =
+      SED_PRINTED_LINES_PATTERN.exec(secondArgument) ?? []
+    const isDirectoryChange = program === 'cd' && programArguments.length === 1
+    const isSedOfLines =
+      program === 'sed' &&
+      firstArgument === '-n' &&
+      firstLineText !== undefined &&
+      programArguments.length === 3
+    const isCatOfFiles =
+      program === 'cat' &&
+      programArguments.length > 0 &&
+      programArguments.every((programArgument) => !programArgument.startsWith('-'))
+    if (isDirectoryChange) {
+      directories.push(toAbsolutePath(currentDirectory, firstArgument))
+    }
+    if (isSedOfLines) {
+      reads.push({
+        filePath: toAbsolutePath(currentDirectory, thirdArgument),
+        readLines: { firstLine: Number(firstLineText), lastLine: Number(lastLineText) },
+      })
+    }
+    if (isCatOfFiles) {
+      reads.push(
+        ...programArguments.map((typedPath) => ({
+          filePath: toAbsolutePath(currentDirectory, typedPath),
+          readLines: null,
+        })),
+      )
+    }
+  }
+  return { directories, reads }
+}
+
+// Each repo is analysed once per hook run, and only when something in it was read or changed.
+const createMapReaderCache = (): ((repoRoot: string) => MapReader) => {
+  const mapReaderByRepoRoot = new Map<string, MapReader>()
+  return (repoRoot) => {
+    const mapReader = mapReaderByRepoRoot.get(repoRoot) ?? createMapReader(repoRoot)
+    mapReaderByRepoRoot.set(repoRoot, mapReader)
+    return mapReader
+  }
+}
+
+const isExistingFile = (filePath: string): boolean =>
+  statSync(filePath, { throwIfNoEntry: false })?.isFile() === true
+
+const respondToBash = (
+  hookEventName: ToolHookEventName,
+  command: string,
+  cwd: string,
+  durationMs: number | undefined,
+  sessionId: string | null,
+): HookOutput | null => {
+  const { directories, reads } = walkCommand(command, cwd)
+  const mapReaderOf = createMapReaderCache()
+  const readContextLines = reads
+    .filter(({ filePath }) => isExistingFile(filePath))
+    .flatMap(({ filePath, readLines }) => {
+      const repoRoot = findMappedRepoRoot(dirname(filePath))
+      return repoRoot === null
+        ? []
+        : describeRead(
+            mapReaderOf(repoRoot),
+            repoRoot,
+            toRepoPath(repoRoot, filePath),
+            readLines,
+            sessionId,
+          )
+    })
+  const mappedRepoRoots = new Set(
+    [...new Set(directories)].flatMap((directory) => findMappedRepoRoot(directory) ?? []),
+  )
+  const editContextLines = [...mappedRepoRoots].flatMap((repoRoot) => {
+    const changedFiles = listFilesChangedByCommand(repoRoot, durationMs, sessionId)
+    if (changedFiles.length === 0) {
+      return []
+    }
+    if (sessionId !== null) {
+      recordEditedRepo(sessionId, repoRoot)
+      recordInspectedEdits(sessionId, repoRoot, changedFiles)
+    }
+    return changedFiles.flatMap(({ file }) =>
+      describeEdit(mapReaderOf(repoRoot), repoRoot, file, sessionId),
+    )
+  })
+  const contextLines = [...readContextLines, ...editContextLines].flatMap((contextText) =>
+    contextText.split('\n'),
+  )
+  const isOverMaxLines = contextLines.length > BASH_CONTEXT_MAX_LINES
+  return addContext(
+    hookEventName,
+    isOverMaxLines
+      ? [
+          ...contextLines.slice(0, BASH_CONTEXT_MAX_LINES),
+          `logicmap: ... and ${contextLines.length - BASH_CONTEXT_MAX_LINES} more lines: logicmap check lists every error, logicmap show <file> a file's rules.`,
+        ]
+      : contextLines,
+  )
 }
 
 // Without a session id (an older Claude Code), every stop in a mapped repo is asked.
@@ -377,28 +632,37 @@ const respondToStop = (
 }
 
 export const respondToHook = (input: HookInput): HookOutput | null => {
+  const sessionId = input.session_id ?? null
+  const hookEventName = input.hook_event_name
+  if (isToolHookEventName(hookEventName) && input.tool_name === BASH_TOOL_NAME) {
+    const command = input.tool_input?.command
+    return respondToBash(
+      hookEventName,
+      typeof command === 'string' ? command : '',
+      input.cwd ?? process.cwd(),
+      input.duration_ms,
+      sessionId,
+    )
+  }
   const filePath = input.tool_input?.file_path
-  const isPostToolUse = input.hook_event_name === HOOK_EVENTS.postToolUse
+  const isPostToolUse = hookEventName === HOOK_EVENTS.postToolUse
   if (isPostToolUse && typeof filePath === 'string') {
     if (input.tool_name === READ_TOOL_NAME) {
-      return respondToRead(
-        filePath,
-        input.tool_input?.offset,
-        input.tool_input?.limit,
-        input.session_id ?? null,
-      )
+      return respondToRead(filePath, input.tool_input?.offset, input.tool_input?.limit, sessionId)
     }
     if (EDITING_TOOL_NAMES.includes(input.tool_name ?? '')) {
-      return respondToEdit(filePath, input.session_id ?? null)
+      return respondToEdit(filePath, sessionId)
     }
     return null
   }
-  if (input.hook_event_name === HOOK_EVENTS.stop) {
-    return respondToStop(
-      input.cwd ?? process.cwd(),
-      input.session_id ?? null,
-      input.stop_hook_active === true,
-    )
+  if (hookEventName === HOOK_EVENTS.postCompact) {
+    if (sessionId !== null) {
+      forgetWhatSessionWasShown(sessionId)
+    }
+    return null
+  }
+  if (hookEventName === HOOK_EVENTS.stop) {
+    return respondToStop(input.cwd ?? process.cwd(), sessionId, input.stop_hook_active === true)
   }
   return null
 }
@@ -410,7 +674,7 @@ const parseHookInput = (inputText: string): HookInput | null => {
   if (!isObject || !('hook_event_name' in parsedInput)) {
     return null
   }
-  const { hook_event_name, session_id, cwd, tool_name, tool_input, stop_hook_active } =
+  const { hook_event_name, session_id, cwd, tool_name, tool_input, duration_ms, stop_hook_active } =
     parsedInput as Record<string, unknown>
   if (typeof hook_event_name !== 'string') {
     return null
@@ -422,6 +686,7 @@ const parseHookInput = (inputText: string): HookInput | null => {
     cwd: typeof cwd === 'string' ? cwd : undefined,
     tool_name: typeof tool_name === 'string' ? tool_name : undefined,
     tool_input: isToolInputObject ? (tool_input as HookInput['tool_input']) : undefined,
+    duration_ms: typeof duration_ms === 'number' ? duration_ms : undefined,
     stop_hook_active: stop_hook_active === true,
   }
 }

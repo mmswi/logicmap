@@ -61,7 +61,9 @@ logicmap.ts why <id>                     a rule, its history, and the commits of
 
 In Claude Code, `scripts/hook.ts` adds the rules covering the lines an agent reads with the newest
 change of those lines, the problems an edit leaves and the rules its `uses` and `test` sites rely on, and
-`check`'s errors at the end of a turn. To install it, see "The hook" in `SKILL.md`.
+`check`'s errors at the end of a turn. It answers the Read and Edit tools and shell commands alike: a
+`sed -n 40,60p <file>` is a read of those lines, and a file a command changed is an edit. To install it, see
+"The hook" in `SKILL.md`.
 
 To set it up in a repo, follow "Setting it up in a repo" in `SKILL.md`. To work a task in a mapped
 repo (a plan whose steps name the rules they touch, decisions recorded when the user makes them, each

@@ -1485,30 +1485,21 @@ export const showLogicMap = (repoRoot: string, target: string | undefined): stri
   return `nothing named "${target}": not a domain or an id in ${LEDGER_DIRECTORY}/, not a file with anchors`
 }
 
-// The rules covering some lines of a file (all of it when lines is null), each as show <file> prints it:
-// what the hook adds after a read.
-export const listRuleSectionsInLines = (
-  repoRoot: string,
-  file: string,
-  lines: LineRange | null,
-): RuleSection[] => {
-  const views = createShowViews(repoRoot)
-  return views.isAnchoredFile(file) ? views.listFileRuleSections(file, lines) : []
-}
-
-// What the hook tells after an edit, from one analysis: every problem check reports, and the rules whose uses
-// or test sites in the file cover some of the changed lines.
-export const inspectEdit = (
-  repoRoot: string,
-  file: string,
-  changedLines: LineRange[],
-): { problems: Problem[]; referringRuleSections: RuleSection[] } => {
+// What the hook asks of the map, from one analysis: every problem check reports; the rules covering some lines of a
+// file (all of it when lines is null), each as show <file> prints it; the rules whose uses or test sites in a file
+// cover some changed lines.
+export const createMapReader = (repoRoot: string) => {
   const views = createShowViews(repoRoot)
   return {
     problems: views.problems,
-    referringRuleSections: views.listReferringRuleSections(file, changedLines),
+    isAnchoredFile: views.isAnchoredFile,
+    listRuleSectionsInLines: (file: string, lines: LineRange | null): RuleSection[] =>
+      views.isAnchoredFile(file) ? views.listFileRuleSections(file, lines) : [],
+    listReferringRuleSections: views.listReferringRuleSections,
   }
 }
+
+export type MapReader = ReturnType<typeof createMapReader>
 
 // ---------- Diff: what changed under a rule's sites since their last ack ----------
 
