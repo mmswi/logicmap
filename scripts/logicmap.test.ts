@@ -2546,6 +2546,27 @@ describe('hook', () => {
     expect(contextOfEdit(sessionId, 'src/new.ts', 'close()', 'close(true)')).toBeNull()
   })
 
+  test('an edit that leaves an anchor with no entry is told its fix, not to ack or bump', () => {
+    const repoRoot = createMappedRepo()
+    const roomPath = join(repoRoot, 'src/room.ts')
+    writeFixtureFiles(repoRoot, {
+      'src/room.ts': readFixtureFile(repoRoot, 'src/room.ts').replace(
+        '  flushPending()',
+        '  // §edge sync.no-such-rule@1\n  flushPending()',
+      ),
+    })
+    const editContext = JSON.stringify(
+      respondToHook({
+        hook_event_name: 'PostToolUse',
+        session_id: `undocumented-${crypto.randomUUID()}`,
+        tool_name: 'Edit',
+        tool_input: { file_path: roomPath },
+      }),
+    )
+    expect(editContext).toContain('error undocumented')
+    expect(editContext).not.toContain('then ack it if it still holds')
+  })
+
   test('at stop, the errors of check, once, for a session that edited the repo; nothing outside one', () => {
     const repoRoot = createMappedRepo()
     const roomPath = join(repoRoot, 'src/room.ts')
@@ -2675,6 +2696,133 @@ describe('hook', () => {
     expect(outputOfBash(`plain-${crypto.randomUUID()}`, plainRepoRoot, 40)).toBeNull()
   })
 
+  test("a Bash command leaves out a version another session's hook answered, and arms no stop for it", () => {
+    const repoRoot = createMappedRepo()
+    commitFixtureRepo(repoRoot, 'wip: the join')
+    const roomPath = join(repoRoot, 'src/room.ts')
+    writeFixtureFiles(repoRoot, {
+      'src/room.ts': readFixtureFile(repoRoot, 'src/room.ts').replace(
+        'removeConnection(connection)',
+        'removeConnection(connection, true)',
+      ),
+    })
+    const editOutput = respondToHook({
+      hook_event_name: 'PostToolUse',
+      session_id: `editing-${crypto.randomUUID()}`,
+      tool_name: 'Edit',
+      tool_input: { file_path: roomPath },
+    })
+    expect(JSON.stringify(editOutput)).toContain('src/room.ts:2: error changed')
+
+    const loggingSessionId = `logging-${crypto.randomUUID()}`
+    const logOutput = respondToHook({
+      hook_event_name: 'PostToolUse',
+      session_id: loggingSessionId,
+      cwd: repoRoot,
+      tool_name: 'Bash',
+      tool_input: { command: 'git log --oneline -1' },
+      duration_ms: 30,
+    })
+    expect(logOutput).toBeNull()
+    expect(
+      respondToHook({ hook_event_name: 'Stop', session_id: loggingSessionId, cwd: repoRoot }),
+    ).toBeNull()
+  })
+
+  test('a Bash command that deletes an anchored file is answered with its gone error, and the stop check armed', () => {
+    const repoRoot = createMappedRepo()
+    commitFixtureRepo(repoRoot, 'wip: the join')
+    const sessionId = `deleting-${crypto.randomUUID()}`
+    rmSync(join(repoRoot, 'src/room.ts'))
+    const deleteOutput = respondToHook({
+      hook_event_name: 'PostToolUse',
+      session_id: sessionId,
+      cwd: repoRoot,
+      tool_name: 'Bash',
+      tool_input: { command: 'rm src/room.ts' },
+      duration_ms: 20,
+    })
+    expect(JSON.stringify(deleteOutput)).toContain('error gone')
+    expect(
+      respondToHook({ hook_event_name: 'Stop', session_id: sessionId, cwd: repoRoot }),
+    ).toMatchObject({ decision: 'block' })
+  })
+
+  test('a Bash answer describes what the command changed, then read, while under forty lines, names the rest, and records only what it printed', () => {
+    const ruleNumbers = Array.from({ length: 25 }, (_, ruleIndex) =>
+      String(ruleIndex + 1).padStart(2, '0'),
+    )
+    const decisionEntryOf = (ruleId: string): string =>
+      [
+        `## ${ruleId}`,
+        'kind: decision',
+        'version: 1',
+        'what: A rule.',
+        'why: fixture.',
+        'source: fixture',
+        '',
+      ].join('\n')
+    const repoRoot = createFixtureRepo({
+      'src/room.ts': [
+        '// §edge sync.close-during-join@1',
+        'if (closedEarly) {',
+        '  joined.removeConnection(connection)',
+        '}',
+        '',
+      ].join('\n'),
+      'src/many.ts': ruleNumbers
+        .flatMap((ruleNumber) => [
+          `// §decision sync.rule-${ruleNumber}@1`,
+          `const rule${ruleNumber} = 1`,
+        ])
+        .join('\n'),
+      'src/extra.ts': ['// §decision sync.extra-rule@1', 'const extra = 1', ''].join('\n'),
+      'logicmap/sync.md': [
+        closeDuringJoinEntry(1),
+        ...ruleNumbers.map((ruleNumber) => decisionEntryOf(`sync.rule-${ruleNumber}`)),
+        decisionEntryOf('sync.extra-rule'),
+      ].join('\n'),
+    })
+    ackIds(repoRoot, [
+      'sync.close-during-join',
+      'sync.extra-rule',
+      ...ruleNumbers.map((ruleNumber) => `sync.rule-${ruleNumber}`),
+    ])
+    commitFixtureRepo(repoRoot, 'wip: the rules')
+    writeFixtureFiles(repoRoot, {
+      'src/room.ts': readFixtureFile(repoRoot, 'src/room.ts').replace(
+        'removeConnection(connection)',
+        'removeConnection(connection, true)',
+      ),
+    })
+    const sessionId = `capped-${crypto.randomUUID()}`
+    const bashOutput = respondToHook({
+      hook_event_name: 'PostToolUse',
+      session_id: sessionId,
+      cwd: repoRoot,
+      tool_name: 'Bash',
+      tool_input: { command: 'python3 rewrite-room.py && cat src/many.ts && cat src/extra.ts' },
+      duration_ms: 30,
+    })
+    const contextLines =
+      bashOutput !== null && 'hookSpecificOutput' in bashOutput
+        ? bashOutput.hookSpecificOutput.additionalContext.split('\n')
+        : []
+
+    expect(contextLines[0]).toStartWith('logicmap: the edit to src/room.ts')
+    expect(contextLines).toContain('sync.rule-25@1  decision  recorded  A rule.')
+    expect(contextLines.at(-1)).toBe(
+      "logicmap: past 40 lines, these were not looked at: src/extra.ts (read). logicmap check lists every error, logicmap show <file> a file's rules.",
+    )
+    const readOutput = respondToHook({
+      hook_event_name: 'PostToolUse',
+      session_id: sessionId,
+      tool_name: 'Read',
+      tool_input: { file_path: join(repoRoot, 'src/extra.ts') },
+    })
+    expect(JSON.stringify(readOutput)).toContain('sync.extra-rule@1  decision  recorded  A rule.')
+  })
+
   test('after a Bash command that prints lines with sed or cat, the rules covering them, from where the command stands', () => {
     const repoRoot = createMappedRepo()
     const plainRepoRoot = createFixtureRepo({ 'src/plain.ts': 'export const plain = 1\n' })
@@ -2732,6 +2880,58 @@ describe('hook', () => {
         elsewhereSessionId,
       ),
     ).toContain('src/room.ts:2: error changed')
+  })
+
+  test('a Bash command is read as the shell reads it: heredocs and quotes, cat flags, sed to the last line, the cwd where it ended', () => {
+    const repoRoot = createMappedRepo()
+    const contextOfCommand = (command: string, cwd = repoRoot): string | null => {
+      const hookOutput = respondToHook({
+        hook_event_name: 'PostToolUse',
+        session_id: `shell-${crypto.randomUUID()}`,
+        cwd,
+        tool_name: 'Bash',
+        tool_input: { command },
+        duration_ms: 12,
+      })
+      return hookOutput !== null && 'hookSpecificOutput' in hookOutput
+        ? hookOutput.hookSpecificOutput.additionalContext
+        : null
+    }
+    const ruleText = 'sync.close-during-join@1  edge  recorded  The socket can close'
+
+    expect(contextOfCommand("cat > notes.md <<'EOF'\nsee:\ncat src/room.ts\nEOF")).toBeNull()
+    expect(
+      contextOfCommand('git commit -m "wip: drop the extra; cat src/room.ts && more"'),
+    ).toBeNull()
+    expect(
+      contextOfCommand("cat > notes.md <<'EOF'\ncd src\nEOF\nsed -n 2,5p src/room.ts"),
+    ).toContain(ruleText)
+    expect(contextOfCommand('cat -n src/room.ts')).toContain(ruleText)
+    expect(contextOfCommand("sed -n '2,$p' src/room.ts")).toContain(ruleText)
+    expect(contextOfCommand('cd src && sed -n 1,3p room.ts', join(repoRoot, 'src'))).toContain(
+      ruleText,
+    )
+  })
+
+  test('a subagent is shown in full the rules its session saw, then by id; its session is not told twice', () => {
+    const repoRoot = createMappedRepo()
+    const sessionId = `parent-${crypto.randomUUID()}`
+    const contextOfRead = (agentId: string | undefined): string =>
+      JSON.stringify(
+        respondToHook({
+          hook_event_name: 'PostToolUse',
+          session_id: sessionId,
+          agent_id: agentId,
+          tool_name: 'Read',
+          tool_input: { file_path: join(repoRoot, 'src/room.ts') },
+        }),
+      )
+    const fullRuleText = 'sync.close-during-join@1  edge  recorded  The socket can close'
+
+    expect(contextOfRead(undefined)).toContain(fullRuleText)
+    expect(contextOfRead('agent-1')).toContain(fullRuleText)
+    expect(contextOfRead('agent-1')).not.toContain(fullRuleText)
+    expect(contextOfRead(undefined)).not.toContain(fullRuleText)
   })
 
   test('after a compaction, a rule shown before is shown in full again; the stop check stays armed', () => {

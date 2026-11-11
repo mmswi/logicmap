@@ -60,6 +60,7 @@ const EDITING_TOOL_NAMES: readonly string[] = ['Edit', 'MultiEdit', 'Write']
 export type HookInput = {
   hook_event_name: string
   session_id?: string
+  agent_id?: string
   cwd?: string
   tool_name?: string
   tool_input?: { file_path?: unknown; offset?: unknown; limit?: unknown; command?: unknown }
@@ -97,27 +98,30 @@ const findMappedRepoRoot = (directory: string): string | null => {
 
 // What the hook keeps per session, one file each: the mapped repos it edited since its last stop, so a
 // stop asks only the sessions that changed something (another session's work in progress stops nobody
-// else), and the rules it was shown in full.
-const SESSION_FILES_DIRECTORY = join(tmpdir(), 'logicmap-hook')
-const sessionFileOf = (sessionId: string, fileSuffix: string): string =>
-  join(SESSION_FILES_DIRECTORY, `${sessionId.replace(/[^\w-]/g, '_')}${fileSuffix}`)
-const editedReposFileOf = (sessionId: string): string => sessionFileOf(sessionId, '.txt')
-const shownRulesFileOf = (sessionId: string): string => sessionFileOf(sessionId, '.shown-rules.txt')
-const namedChangesFileOf = (sessionId: string): string =>
-  sessionFileOf(sessionId, '.named-changes.txt')
-const reliedOnRulesFileOf = (sessionId: string): string =>
-  sessionFileOf(sessionId, '.relied-on-rules.txt')
-const inspectedEditsFileOf = (sessionId: string): string =>
-  sessionFileOf(sessionId, '.inspected-edits.txt')
+// else). And per conversation, the session's or each of its subagents', what it was shown once: the rules in
+// full, a file's newest change, the rules relied on.
+const HOOK_STATE_DIRECTORY = join(tmpdir(), 'logicmap-hook')
+const stateFileOf = (ownerId: string, fileSuffix: string): string =>
+  join(HOOK_STATE_DIRECTORY, `${ownerId.replace(/[^\w-]/g, '_')}${fileSuffix}`)
+const editedReposFileOf = (sessionId: string): string => stateFileOf(sessionId, '.txt')
+const shownRulesFileOf = (conversationId: string): string =>
+  stateFileOf(conversationId, '.shown-rules.txt')
+const namedChangesFileOf = (conversationId: string): string =>
+  stateFileOf(conversationId, '.named-changes.txt')
+const reliedOnRulesFileOf = (conversationId: string): string =>
+  stateFileOf(conversationId, '.relied-on-rules.txt')
+// And for every session at once, the file versions a hook already answered: a command is answered only for the
+// versions no hook answered, so another session's edit is never its own.
+const ANSWERED_EDITS_FILE = join(HOOK_STATE_DIRECTORY, 'answered-edits.txt')
 
-const appendToSessionFile = (sessionFile: string, lines: string[]): void => {
-  mkdirSync(SESSION_FILES_DIRECTORY, { recursive: true })
-  appendFileSync(sessionFile, lines.map((line) => `${line}\n`).join(''))
+const appendToStateFile = (stateFile: string, lines: string[]): void => {
+  mkdirSync(HOOK_STATE_DIRECTORY, { recursive: true })
+  appendFileSync(stateFile, lines.map((line) => `${line}\n`).join(''))
 }
 
 // git prints the repo root with symlinks resolved (macOS: /var → /private/var), so the path is too.
 const recordEditedRepo = (sessionId: string, repoRoot: string): void =>
-  appendToSessionFile(editedReposFileOf(sessionId), [repoRoot])
+  appendToStateFile(editedReposFileOf(sessionId), [repoRoot])
 
 // Read once: the next stop asks again only after another edit.
 const takeEditedRepos = (sessionId: string): Set<string> => {
@@ -154,17 +158,17 @@ const toReadLines = (offset: unknown, limit: unknown): LineRange | null => {
 const shownRuleLineOf = (repoRoot: string, ruleSection: RuleSection): string =>
   `${repoRoot} ${ruleSection.id}@${ruleSection.version ?? '?'}`
 
-const readSessionFileLines = (sessionFile: string): Set<string> =>
-  existsSync(sessionFile)
-    ? new Set(readFileSync(sessionFile, 'utf8').split('\n').filter(Boolean))
+const readStateFileLines = (stateFile: string): Set<string> =>
+  existsSync(stateFile)
+    ? new Set(readFileSync(stateFile, 'utf8').split('\n').filter(Boolean))
     : new Set()
 
-// What a session was shown once is gone from its context after a compaction, so it is shown again.
-const forgetWhatSessionWasShown = (sessionId: string): void => {
+// What a conversation was shown once is gone from its context after a compaction, so it is shown again.
+const forgetWhatConversationWasShown = (conversationId: string): void => {
   const shownOnceFiles = [
-    shownRulesFileOf(sessionId),
-    namedChangesFileOf(sessionId),
-    reliedOnRulesFileOf(sessionId),
+    shownRulesFileOf(conversationId),
+    namedChangesFileOf(conversationId),
+    reliedOnRulesFileOf(conversationId),
   ]
   for (const shownOnceFile of shownOnceFiles) {
     rmSync(shownOnceFile, { force: true })
@@ -197,13 +201,13 @@ const listNewestChangeLines = (
   repoRoot: string,
   file: string,
   readLines: LineRange | null,
-  sessionId: string | null,
+  conversationId: string | null,
 ): string[] => {
   const isCodeFile = !file.endsWith('.md') && !file.startsWith(`${LEDGER_DIRECTORY}/`)
   const namedChangeLine = `${repoRoot} ${file}`
-  const namedChangesFile = sessionId === null ? null : namedChangesFileOf(sessionId)
+  const namedChangesFile = conversationId === null ? null : namedChangesFileOf(conversationId)
   const isNamedBefore =
-    namedChangesFile !== null && readSessionFileLines(namedChangesFile).has(namedChangeLine)
+    namedChangesFile !== null && readStateFileLines(namedChangesFile).has(namedChangeLine)
   if (!isCodeFile || isNamedBefore) {
     return []
   }
@@ -213,7 +217,7 @@ const listNewestChangeLines = (
       return []
     }
     if (namedChangesFile !== null) {
-      appendToSessionFile(namedChangesFile, [namedChangeLine])
+      appendToStateFile(namedChangesFile, [namedChangeLine])
     }
     const { piece } = newestChange
     const pieceText = piece === null ? '' : `, recorded as ${piece.label} in ${piece.docPath}`
@@ -231,23 +235,25 @@ const describeRead = (
   repoRoot: string,
   file: string,
   readLines: LineRange | null,
-  sessionId: string | null,
+  conversationId: string | null,
 ): string[] => {
   const ruleSections = mapReader.listRuleSectionsInLines(file, readLines)
-  const newestChangeLines = listNewestChangeLines(repoRoot, file, readLines, sessionId)
+  const newestChangeLines = listNewestChangeLines(repoRoot, file, readLines, conversationId)
   const shownRuleLines =
-    sessionId === null ? new Set<string>() : readSessionFileLines(shownRulesFileOf(sessionId))
+    conversationId === null
+      ? new Set<string>()
+      : readStateFileLines(shownRulesFileOf(conversationId))
   const isShownBefore = (ruleSection: RuleSection): boolean =>
     shownRuleLines.has(shownRuleLineOf(repoRoot, ruleSection))
   const newRuleSections = ruleSections.filter((ruleSection) => !isShownBefore(ruleSection))
   const shownBeforeRuleNames = ruleSections
     .filter(isShownBefore)
     .map((ruleSection) => `${ruleSection.id}@${ruleSection.version ?? '?'}`)
-  if (sessionId !== null) {
+  if (conversationId !== null) {
     const newShownRuleLines = newRuleSections.map((ruleSection) =>
       shownRuleLineOf(repoRoot, ruleSection),
     )
-    appendToSessionFile(shownRulesFileOf(sessionId), newShownRuleLines)
+    appendToStateFile(shownRulesFileOf(conversationId), newShownRuleLines)
   }
   const shownBeforeLines =
     shownBeforeRuleNames.length === 0
@@ -269,7 +275,7 @@ const respondToRead = (
   filePath: string,
   offset: unknown,
   limit: unknown,
-  sessionId: string | null,
+  conversationId: string | null,
 ): HookOutput | null => {
   const repoRoot = findMappedRepoRoot(dirname(filePath))
   if (repoRoot === null) {
@@ -279,7 +285,7 @@ const respondToRead = (
   const readLines = toReadLines(offset, limit)
   return addContext(
     HOOK_EVENTS.postToolUse,
-    describeRead(createMapReader(repoRoot), repoRoot, file, readLines, sessionId),
+    describeRead(createMapReader(repoRoot), repoRoot, file, readLines, conversationId),
   )
 }
 
@@ -322,8 +328,13 @@ const COMMAND_RUN_SLACK_MS = 5000
 
 type ChangedFile = { file: string; modifiedAtMs: number }
 
-// The files that differ from HEAD or that git doesn't track yet, each with when it was last written. A deleted
-// file has no such time and is left out. None when git fails.
+// When a file was last written; a deleted one takes its nearest directory still there, whose time the removal set.
+const lastWrittenAtMsOf = (repoRoot: string, file: string): number =>
+  statSync(join(repoRoot, file), { throwIfNoEntry: false })?.mtimeMs ??
+  lastWrittenAtMsOf(repoRoot, dirname(file))
+
+// The files that differ from HEAD or that git doesn't track yet, each with when it was last written. None when git
+// fails.
 const listFilesChangedSinceHead = (repoRoot: string): ChangedFile[] => {
   try {
     return execFileSync(
@@ -336,48 +347,46 @@ const listFilesChangedSinceHead = (repoRoot: string): ChangedFile[] => {
         '--no-renames',
         '--untracked-files=all',
       ],
-      { cwd: repoRoot, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] },
+      {
+        cwd: repoRoot,
+        encoding: 'utf8',
+        maxBuffer: 64 * 1024 * 1024,
+        stdio: ['ignore', 'pipe', 'ignore'],
+      },
     )
       .split('\0')
       .filter(Boolean)
-      .flatMap((statusEntry) => {
+      .map((statusEntry) => {
         const file = statusEntry.slice(STATUS_ENTRY_PATH_START)
-        const modifiedAtMs = statSync(join(repoRoot, file), { throwIfNoEntry: false })?.mtimeMs
-        return modifiedAtMs === undefined ? [] : [{ file, modifiedAtMs }]
+        return { file, modifiedAtMs: lastWrittenAtMsOf(repoRoot, file) }
       })
   } catch {
     return []
   }
 }
 
-const inspectedEditLineOf = (repoRoot: string, { file, modifiedAtMs }: ChangedFile): string =>
+const answeredEditLineOf = (repoRoot: string, { file, modifiedAtMs }: ChangedFile): string =>
   `${repoRoot} ${file} ${modifiedAtMs}`
 
-// The files a command changed: written during its run, and not answered for yet as they are now. An input with
+// The files a command changed: written during its run, and answered by no hook yet as they are now. An input with
 // no duration (an older Claude Code) gives no run to compare with, so every changed file counts.
 const listFilesChangedByCommand = (
   repoRoot: string,
   durationMs: number | undefined,
-  sessionId: string | null,
 ): ChangedFile[] => {
   const runStartMs = durationMs === undefined ? 0 : Date.now() - durationMs - COMMAND_RUN_SLACK_MS
-  const inspectedEditLines =
-    sessionId === null ? new Set<string>() : readSessionFileLines(inspectedEditsFileOf(sessionId))
+  const answeredEditLines = readStateFileLines(ANSWERED_EDITS_FILE)
   return listFilesChangedSinceHead(repoRoot).filter(
     (changedFile) =>
       changedFile.modifiedAtMs >= runStartMs &&
-      !inspectedEditLines.has(inspectedEditLineOf(repoRoot, changedFile)),
+      !answeredEditLines.has(answeredEditLineOf(repoRoot, changedFile)),
   )
 }
 
-const recordInspectedEdits = (
-  sessionId: string,
-  repoRoot: string,
-  changedFiles: ChangedFile[],
-): void =>
-  appendToSessionFile(
-    inspectedEditsFileOf(sessionId),
-    changedFiles.map((changedFile) => inspectedEditLineOf(repoRoot, changedFile)),
+const recordAnsweredEdits = (repoRoot: string, changedFiles: ChangedFile[]): void =>
+  appendToStateFile(
+    ANSWERED_EDITS_FILE,
+    changedFiles.map((changedFile) => answeredEditLineOf(repoRoot, changedFile)),
   )
 
 const reliedOnRuleLineOf = (repoRoot: string, file: string, ruleSection: RuleSection): string =>
@@ -390,11 +399,11 @@ const listReliedOnRuleLines = (
   file: string,
   referringRuleSections: RuleSection[],
   fileErrors: Problem[],
-  sessionId: string | null,
+  conversationId: string | null,
 ): string[] => {
-  const reliedOnRulesFile = sessionId === null ? null : reliedOnRulesFileOf(sessionId)
+  const reliedOnRulesFile = conversationId === null ? null : reliedOnRulesFileOf(conversationId)
   const namedRuleLines =
-    reliedOnRulesFile === null ? new Set<string>() : readSessionFileLines(reliedOnRulesFile)
+    reliedOnRulesFile === null ? new Set<string>() : readStateFileLines(reliedOnRulesFile)
   const erroredIds = new Set(fileErrors.map((problem) => problem.id))
   const newRuleSections = referringRuleSections.filter(
     (ruleSection) =>
@@ -405,7 +414,7 @@ const listReliedOnRuleLines = (
     return []
   }
   if (reliedOnRulesFile !== null) {
-    appendToSessionFile(
+    appendToStateFile(
       reliedOnRulesFile,
       newRuleSections.map((ruleSection) => reliedOnRuleLineOf(repoRoot, file, ruleSection)),
     )
@@ -422,7 +431,7 @@ const describeEdit = (
   mapReader: MapReader,
   repoRoot: string,
   file: string,
-  sessionId: string | null,
+  conversationId: string | null,
 ): string[] => {
   const fileErrors = mapReader.problems.filter(
     (problem) => problem.severity === PROBLEM_SEVERITIES.error && isProblemOfFile(problem, file),
@@ -436,19 +445,23 @@ const describeEdit = (
     file,
     referringRuleSections,
     fileErrors,
-    sessionId,
+    conversationId,
   )
   const errorLines =
     fileErrors.length === 0
       ? []
       : [
-          `logicmap: the edit to ${file} left the map out of step with the code. Re-read each entry (logicmap show <id>), then ack it if it still holds, or bump its version if its meaning changed:`,
+          `logicmap: the edit to ${file} left the map out of step with the code; each error says how to resolve it:`,
           ...fileErrors.map(formatProblem),
         ]
   return [...errorLines, ...reliedOnRuleLines]
 }
 
-const respondToEdit = (filePath: string, sessionId: string | null): HookOutput | null => {
+const respondToEdit = (
+  filePath: string,
+  sessionId: string | null,
+  conversationId: string | null,
+): HookOutput | null => {
   const repoRoot = findMappedRepoRoot(dirname(filePath))
   if (repoRoot === null) {
     return null
@@ -456,21 +469,23 @@ const respondToEdit = (filePath: string, sessionId: string | null): HookOutput |
   const file = toRepoPath(repoRoot, filePath)
   if (sessionId !== null) {
     recordEditedRepo(sessionId, repoRoot)
-    recordInspectedEdits(sessionId, repoRoot, [{ file, modifiedAtMs: statSync(filePath).mtimeMs }])
   }
-  return addContext(
-    HOOK_EVENTS.postToolUse,
-    describeEdit(createMapReader(repoRoot), repoRoot, file, sessionId),
-  )
+  const editContextLines = describeEdit(createMapReader(repoRoot), repoRoot, file, conversationId)
+  recordAnsweredEdits(repoRoot, [{ file, modifiedAtMs: statSync(filePath).mtimeMs }])
+  return addContext(HOOK_EVENTS.postToolUse, editContextLines)
 }
 
-// A command that changes many files is told this many lines at most; check lists the rest.
+// Past this many lines, a command's answer describes no more of the files it changed or read, and names them.
 const BASH_CONTEXT_MAX_LINES = 40
 
-const COMMAND_SEPARATOR_PATTERN = /&&|\|\||[;|\n]/
+// A heredoc's opening line, kept, and its body through the line holding its word, dropped: its text runs nothing.
+const HEREDOC_BODY_PATTERN = /(<<-?[ \t]*(['"]?)(\w+)\2[^\n]*)\n[\s\S]*?\n[ \t]*\3[ \t]*(?=\n|$)/g
+// One command between the shell's separators (`;`, `&`, `|`, a line break), quoted text never cut.
+const COMMAND_SEGMENT_PATTERN = /(?:'[^']*'|"(?:\\.|[^"\\])*"|[^;&|\n'"])+/g
 const QUOTED_WORD_PATTERN = /^(['"])(.*)\1$/
-// The lines sed -n prints: `40,60p`, or `40p` for one line.
-const SED_PRINTED_LINES_PATTERN = /^(\d+)(?:,(\d+))?p$/
+// The lines sed -n prints: `40,60p`, `40p` for one line, `40,$p` to the last.
+const SED_PRINTED_LINES_PATTERN = /^(\d+)(?:,(\d+|\$))?p$/
+const SED_LAST_LINE = '$'
 const HOME_PATH_START = '~/'
 // `2>/dev/null`, `2>&1`: where a command's errors go changes nothing of what it prints.
 const ERRORS_REDIRECT_PATTERN = /^2>/
@@ -483,15 +498,24 @@ const toAbsolutePath = (directory: string, typedPath: string): string =>
     ? join(homedir(), typedPath.slice(HOME_PATH_START.length))
     : resolve(directory, typedPath)
 
-// The directories a command stands in, the session's first and then each `cd` target, and the files it prints with
-// `sed -n` or `cat`, each from the directory it stands in at that point.
+const isExistingFile = (filePath: string): boolean =>
+  statSync(filePath, { throwIfNoEntry: false })?.isFile() === true
+
+// The directories a command stands in, the input's cwd and then each `cd` target, and the files it prints with
+// `sed -n` or `cat`. Claude Code gives the cwd the command ended in, so a file is looked for from the directory
+// replayed up to its read, then from that cwd: `cd src && sed -n 1,3p room.ts` ended in src.
 const walkCommand = (
   command: string,
   cwd: string,
 ): { directories: string[]; reads: CommandRead[] } => {
   const directories = [cwd]
   const reads: CommandRead[] = []
-  for (const segment of command.split(COMMAND_SEPARATOR_PATTERN)) {
+  const toReadPath = (currentDirectory: string, typedPath: string): string => {
+    const replayedPath = toAbsolutePath(currentDirectory, typedPath)
+    return isExistingFile(replayedPath) ? replayedPath : toAbsolutePath(cwd, typedPath)
+  }
+  const segments = command.replace(HEREDOC_BODY_PATTERN, '$1').match(COMMAND_SEGMENT_PATTERN) ?? []
+  for (const segment of segments) {
     const [program, ...typedArguments] = segment
       .trim()
       .split(/\s+/)
@@ -500,35 +524,38 @@ const walkCommand = (
       (typedArgument) => !ERRORS_REDIRECT_PATTERN.test(typedArgument),
     )
     const currentDirectory = directories.at(-1) ?? cwd
-    const [firstArgument = '', secondArgument = '', thirdArgument = ''] = programArguments
+    const [directoryChangeTarget = ''] = programArguments
+    const [sedQuietFlag, sedPrintedLinesText = '', sedPrintedFile = ''] = programArguments
     const [, firstLineText, lastLineText = firstLineText] =
-      SED_PRINTED_LINES_PATTERN.exec(secondArgument) ?? []
+      SED_PRINTED_LINES_PATTERN.exec(sedPrintedLinesText) ?? []
+    const catPrintedFiles = programArguments.filter(
+      (programArgument) => !programArgument.startsWith('-'),
+    )
     const isDirectoryChange = program === 'cd' && programArguments.length === 1
     const isSedOfLines =
       program === 'sed' &&
-      firstArgument === '-n' &&
+      sedQuietFlag === '-n' &&
       firstLineText !== undefined &&
       programArguments.length === 3
     const isCatOfFiles =
       program === 'cat' &&
-      programArguments.length > 0 &&
-      programArguments.every(
-        (programArgument) =>
-          !programArgument.startsWith('-') && !REDIRECT_PATTERN.test(programArgument),
-      )
+      catPrintedFiles.length > 0 &&
+      !programArguments.some((programArgument) => REDIRECT_PATTERN.test(programArgument))
     if (isDirectoryChange) {
-      directories.push(toAbsolutePath(currentDirectory, firstArgument))
+      directories.push(toAbsolutePath(currentDirectory, directoryChangeTarget))
     }
     if (isSedOfLines) {
+      const lastLine =
+        lastLineText === SED_LAST_LINE ? Number.MAX_SAFE_INTEGER : Number(lastLineText)
       reads.push({
-        filePath: toAbsolutePath(currentDirectory, thirdArgument),
-        readLines: { firstLine: Number(firstLineText), lastLine: Number(lastLineText) },
+        filePath: toReadPath(currentDirectory, sedPrintedFile),
+        readLines: { firstLine: Number(firstLineText), lastLine },
       })
     }
     if (isCatOfFiles) {
       reads.push(
-        ...programArguments.map((typedPath) => ({
-          filePath: toAbsolutePath(currentDirectory, typedPath),
+        ...catPrintedFiles.map((typedPath) => ({
+          filePath: toReadPath(currentDirectory, typedPath),
           readLines: null,
         })),
       )
@@ -547,8 +574,8 @@ const createMapReaderCache = (): ((repoRoot: string) => MapReader) => {
   }
 }
 
-const isExistingFile = (filePath: string): boolean =>
-  statSync(filePath, { throwIfNoEntry: false })?.isFile() === true
+// What a command did to one file, described only while its answer has room.
+type CommandFileEffect = { label: string; describe: () => string[] }
 
 const respondToBash = (
   hookEventName: ToolHookEventName,
@@ -556,52 +583,66 @@ const respondToBash = (
   cwd: string,
   durationMs: number | undefined,
   sessionId: string | null,
+  conversationId: string | null,
 ): HookOutput | null => {
   const { directories, reads } = walkCommand(command, cwd)
   const mapReaderOf = createMapReaderCache()
-  const readContextLines = reads
-    .filter(({ filePath }) => isExistingFile(filePath))
-    .flatMap(({ filePath, readLines }) => {
-      const repoRoot = findMappedRepoRoot(dirname(filePath))
-      return repoRoot === null
-        ? []
-        : describeRead(
-            mapReaderOf(repoRoot),
-            repoRoot,
-            toRepoPath(repoRoot, filePath),
-            readLines,
-            sessionId,
-          )
-    })
   const mappedRepoRoots = new Set(
     [...new Set(directories)].flatMap((directory) => findMappedRepoRoot(directory) ?? []),
   )
-  const editContextLines = [...mappedRepoRoots].flatMap((repoRoot) => {
-    const changedFiles = listFilesChangedByCommand(repoRoot, durationMs, sessionId)
-    if (changedFiles.length === 0) {
-      return []
-    }
-    if (sessionId !== null) {
+  // The stop check is armed before anything is analysed, so a failing analysis still leaves it armed.
+  const changeEffects = [...mappedRepoRoots].flatMap((repoRoot): CommandFileEffect[] => {
+    const changedFiles = listFilesChangedByCommand(repoRoot, durationMs)
+    if (sessionId !== null && changedFiles.length > 0) {
       recordEditedRepo(sessionId, repoRoot)
-      recordInspectedEdits(sessionId, repoRoot, changedFiles)
     }
-    return changedFiles.flatMap(({ file }) =>
-      describeEdit(mapReaderOf(repoRoot), repoRoot, file, sessionId),
-    )
+    return changedFiles.map((changedFile) => ({
+      label: `${changedFile.file} (changed)`,
+      describe: () => {
+        const editContextLines = describeEdit(
+          mapReaderOf(repoRoot),
+          repoRoot,
+          changedFile.file,
+          conversationId,
+        )
+        recordAnsweredEdits(repoRoot, [changedFile])
+        return editContextLines
+      },
+    }))
   })
-  const contextLines = [...readContextLines, ...editContextLines].flatMap((contextText) =>
-    contextText.split('\n'),
-  )
-  const isOverMaxLines = contextLines.length > BASH_CONTEXT_MAX_LINES
-  return addContext(
-    hookEventName,
-    isOverMaxLines
-      ? [
-          ...contextLines.slice(0, BASH_CONTEXT_MAX_LINES),
-          `logicmap: ... and ${contextLines.length - BASH_CONTEXT_MAX_LINES} more lines: logicmap check lists every error, logicmap show <file> a file's rules.`,
+  const readEffects = reads
+    .filter(({ filePath }) => isExistingFile(filePath))
+    .flatMap(({ filePath, readLines }): CommandFileEffect[] => {
+      const repoRoot = findMappedRepoRoot(dirname(filePath))
+      if (repoRoot === null) {
+        return []
+      }
+      const file = toRepoPath(repoRoot, filePath)
+      return [
+        {
+          label: `${file} (read)`,
+          describe: () =>
+            describeRead(mapReaderOf(repoRoot), repoRoot, file, readLines, conversationId),
+        },
+      ]
+    })
+  const contextLines: string[] = []
+  const leftOutLabels: string[] = []
+  for (const fileEffect of [...changeEffects, ...readEffects]) {
+    const hasRoom = contextLines.length < BASH_CONTEXT_MAX_LINES
+    if (hasRoom) {
+      contextLines.push(...fileEffect.describe().flatMap((contextText) => contextText.split('\n')))
+    } else {
+      leftOutLabels.push(fileEffect.label)
+    }
+  }
+  const leftOutLines =
+    leftOutLabels.length === 0
+      ? []
+      : [
+          `logicmap: past ${BASH_CONTEXT_MAX_LINES} lines, these were not looked at: ${leftOutLabels.join(', ')}. logicmap check lists every error, logicmap show <file> a file's rules.`,
         ]
-      : contextLines,
-  )
+  return addContext(hookEventName, [...contextLines, ...leftOutLines])
 }
 
 // Without a session id (an older Claude Code), every stop in a mapped repo is asked.
@@ -642,6 +683,11 @@ const respondToStop = (
 
 export const respondToHook = (input: HookInput): HookOutput | null => {
   const sessionId = input.session_id ?? null
+  // A subagent's input holds its session's id and its own agent id: what it was shown is its own.
+  const conversationId =
+    sessionId === null || input.agent_id === undefined
+      ? sessionId
+      : `${sessionId}.${input.agent_id}`
   const hookEventName = input.hook_event_name
   if (isToolHookEventName(hookEventName) && input.tool_name === BASH_TOOL_NAME) {
     const command = input.tool_input?.command
@@ -651,22 +697,28 @@ export const respondToHook = (input: HookInput): HookOutput | null => {
       input.cwd ?? process.cwd(),
       input.duration_ms,
       sessionId,
+      conversationId,
     )
   }
   const filePath = input.tool_input?.file_path
   const isPostToolUse = hookEventName === HOOK_EVENTS.postToolUse
   if (isPostToolUse && typeof filePath === 'string') {
     if (input.tool_name === READ_TOOL_NAME) {
-      return respondToRead(filePath, input.tool_input?.offset, input.tool_input?.limit, sessionId)
+      return respondToRead(
+        filePath,
+        input.tool_input?.offset,
+        input.tool_input?.limit,
+        conversationId,
+      )
     }
     if (EDITING_TOOL_NAMES.includes(input.tool_name ?? '')) {
-      return respondToEdit(filePath, sessionId)
+      return respondToEdit(filePath, sessionId, conversationId)
     }
     return null
   }
   if (hookEventName === HOOK_EVENTS.postCompact) {
-    if (sessionId !== null) {
-      forgetWhatSessionWasShown(sessionId)
+    if (conversationId !== null) {
+      forgetWhatConversationWasShown(conversationId)
     }
     return null
   }
@@ -683,8 +735,16 @@ const parseHookInput = (inputText: string): HookInput | null => {
   if (!isObject || !('hook_event_name' in parsedInput)) {
     return null
   }
-  const { hook_event_name, session_id, cwd, tool_name, tool_input, duration_ms, stop_hook_active } =
-    parsedInput as Record<string, unknown>
+  const {
+    hook_event_name,
+    session_id,
+    agent_id,
+    cwd,
+    tool_name,
+    tool_input,
+    duration_ms,
+    stop_hook_active,
+  } = parsedInput as Record<string, unknown>
   if (typeof hook_event_name !== 'string') {
     return null
   }
@@ -692,6 +752,7 @@ const parseHookInput = (inputText: string): HookInput | null => {
   return {
     hook_event_name,
     session_id: typeof session_id === 'string' ? session_id : undefined,
+    agent_id: typeof agent_id === 'string' ? agent_id : undefined,
     cwd: typeof cwd === 'string' ? cwd : undefined,
     tool_name: typeof tool_name === 'string' ? tool_name : undefined,
     tool_input: isToolInputObject ? (tool_input as HookInput['tool_input']) : undefined,

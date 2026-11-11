@@ -36,10 +36,10 @@ All by the agent, under Mihai's "tu esti seful pe logicmap" (2026-11-03).
   and `SessionStart` with `source: compact`, all with the session's id unchanged. One event is enough; `PostCompact`
   is the one that says the compaction happened.
 
-Known limits, left as they are: a file a command deleted has no modification time and is not inspected (the Stop
-check sees it when the command changed any other file); a command that edits and commits in one go leaves no
-difference from HEAD to inspect (`check` before a commit stays the protocol); a command left running in the
-background is seen when it starts.
+Known limits, left as they are: a command that edits and commits in one go leaves no difference from HEAD to
+inspect (`check` before a commit stays the protocol); a command left running in the background is seen when it
+starts; a file copied with its old modification time (`cp -p`) is not seen; a file the user's editor, or another
+session's command, writes while the command runs is answered as the command's, unless a hook answered it first.
 
 ## Steps
 ### 1. One analysis for every file of a hook run
@@ -85,8 +85,76 @@ Files: `SKILL.md`, `README.md`
 Files: `scripts/hook.ts`, `scripts/logicmap.test.ts`
 Seam: `respondToHook` with `tool_name: 'Bash'`.
 
+### 7. An edit another session answered is not this command's
+- [x] Red: session B's Edit hook answered `src/room.ts`; session A then runs `git log`: nothing, and A's Stop
+  asks nothing.
+- [x] Green: the answered edits are one file for every session, `repoRoot file modifiedAtMs` per line.
+Files: `scripts/hook.ts`, `scripts/logicmap.test.ts`
+Seam: `respondToHook`, two session ids.
+
+### 8. A deleted file is a change
+- [x] Red: `rm src/room.ts` in a command: its `gone` error, and the Stop check armed.
+- [x] Green: a file git lists and the disk lacks takes the time of its nearest directory still there, which its
+  removal wrote.
+Files: `scripts/hook.ts`, `scripts/logicmap.test.ts`
+Seam: `respondToHook` with `tool_name: 'Bash'`.
+
+### 9. The answer holds what it records
+- [x] Red: a command reading a file with 25 rules and changing another: the change's errors come first, the read's
+  rules follow while the answer is under 40 lines, the rest is named as not looked at; a Read of the file after it
+  shows the rules left out in full.
+- [x] Green: the changes, then the reads, each described only while the answer is under 40 lines, so only what is
+  printed is recorded as shown; the Stop check armed before any is described; a change recorded as answered after
+  its description; `git status` given a 64 MiB buffer.
+Files: `scripts/hook.ts`, `scripts/logicmap.test.ts`
+Seam: `respondToHook` with `tool_name: 'Bash'`, then `tool_name: 'Read'`.
+
+### 10. The command read as the shell reads it
+- [x] Red: a `cat <file>` inside a heredoc's body or a quoted commit message is no read; a `cd` in a heredoc moves
+  nothing; `cat -n <file>` and `sed -n '2,$p' <file>` are reads; the input's `cwd` is where the command ended, so
+  `cd src && sed -n 1,3p room.ts` with `cwd` at `src` is a read of `src/room.ts`.
+- [x] Green: heredoc bodies dropped before the command is cut; quoted text never cuts it; `cat` takes flags; `$`
+  as sed's last line; a read's file looked for from where the command stood, then from the input's `cwd`.
+Files: `scripts/hook.ts`, `scripts/logicmap.test.ts`
+Seam: `respondToHook` with `tool_name: 'Bash'`.
+
+### 11. A subagent is shown its rules
+- [x] Red: the session read a rule; a subagent of it (same `session_id`, an `agent_id`) reading the same lines is
+  shown the rule in full, then by id.
+- [x] Green: what was shown once is kept per conversation: the session id, plus the agent id inside a subagent.
+  The edited repos stay per session.
+Files: `scripts/hook.ts`, `scripts/logicmap.test.ts`
+Seam: `respondToHook` with `agent_id`.
+
+### 12. The edit's lead-in fits its errors
+- [x] Red: an edit leaving an `undocumented` anchor is not told to ack or bump.
+- [x] Green: the lead-in says each error names its fix.
+Files: `scripts/hook.ts`, `scripts/logicmap.test.ts`
+Seam: `respondToHook` with `tool_name: 'Edit'`.
+
 ## Revisions
 - 2026-11-11, the agent (seen in the session that wrote the hook, building a scratch repo with
   `cat > src/session.ts <<'CODE'`): the hook answered each written file as a read of it, with its rules and its
   newest change. Decision 3 counted a heredoc's lines as the cost of the naive cut and missed that the `cat` holding
   the heredoc names a real file. Step 6 added.
+- 2026-11-11, the review of 674a341..b1bb974 (mihai-code-review: timing, data and blast-radius reviewers, each
+  finding reproduced):
+  - The 40-line cap cut lines after `describeRead` and `describeEdit` had recorded them as shown, so a rule cut from
+    a `cat` was later named as "shown earlier" (all three reviewers). Step 9 added.
+  - Any file written during the run was the command's: session A's `git log` was answered with session B's
+    error and A's Stop blocked on it (all three). Decision 1 keeps the window; step 7 skips what any session's
+    hook answered. The user's editor and another session's concurrent command stay a known limit.
+  - `rm` left `gone` errors with no answer and no Stop (timing, data). Step 8 added; the known limit is removed.
+  - A failure in the analysis left the Stop check unarmed, and an edit recorded as answered before its answer
+    (timing); `git status` past 1 MiB of output answered nothing (data). Both into step 9.
+  - Heredoc bodies and quoted text were cut into commands (data); `cat -n` was no read (the trial of the
+    shorter skill). Step 10 added.
+  - Seen in this session: the input's `cwd` is where the command ended, so `cd src/sync && sed -n 302,303p
+    ws-routes.ts` was missed (a command writing a file after the same `cd` was answered, so the hook runs).
+    Decision 3 assumed the session's directory before the command. Into step 10.
+  - A subagent shares its session's id, so it was told "shown earlier" for rules only its parent saw (the
+    trial). Step 11 added.
+  - An `undocumented` error came under a lead-in telling to ack or bump (the trial). Step 12 added.
+  - Left as they are: a `sed -n` read before the same command edits that file describes the lines after the
+    edit (timing; the read and the edit then disagree only by the lines the edit moved); a command in the
+    background and a commit inside the command stay known limits.
