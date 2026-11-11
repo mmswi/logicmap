@@ -19,8 +19,11 @@ import {
   type Problem,
   ackIds,
   ackRenamedIds,
+  bumpId,
   checkRepo,
+  checkRepoWithChanges,
   diffLogicMap,
+  findInLogicMap,
   showLogicMap,
   whyLogicMap,
 } from './logicmap.ts'
@@ -1312,7 +1315,7 @@ describe('show', () => {
 
     expect(showLogicMap(repoRoot, undefined)).toEqual(
       [
-        'logicmap: 2 rules in 2 domains. show <domain>: its rules and their claims; show <id>: one rule and its sites; show <file>[:<line>[-<line>]]: the rules in a file.',
+        'logicmap: 2 rules in 2 domains. show <domain>: its rules and their claims; show <id>: one rule and its sites; show <file>[:<line>[-<line>]]: the rules in a file; find <word>...: the rules about something.',
         '',
         'access  1 rule  logicmap/access.md',
         '  access.not-found-not-forbidden  decision  inferred',
@@ -1329,6 +1332,127 @@ describe('show', () => {
         'sync.rooms-per-document@1  decision  ok  recorded  One room per open document.  (sites: 1)',
       ].join('\n'),
     )
+  })
+
+  test('a wide view over its size leaves the ids, or the claims, out and says how to reach them; in full on request', () => {
+    const longName =
+      'a-rule-with-a-long-name-so-that-two-hundred-and-fifty-of-them-fill-the-widest-view'
+    const ruleIdOf = (ruleNumber: number): string =>
+      `sync.rule-${String(ruleNumber).padStart(3, '0')}-${longName}`
+    const repoRoot = createFixtureRepo({
+      'logicmap/sync.md': [
+        '# sync',
+        'The live document sync.',
+        '',
+        ...Array.from({ length: 250 }, (_, ruleIndex) =>
+          [
+            `## ${ruleIdOf(ruleIndex + 1)}`,
+            'kind: decision',
+            'version: 1',
+            'what: Every word of this claim is here to make the view of the domain long. The detail.',
+            'why: fixture.',
+            'source: fixture',
+            '',
+          ].join('\n'),
+        ),
+      ].join('\n'),
+    })
+
+    const mapView = showLogicMap(repoRoot, undefined)
+    expect(mapView).toContain('sync  250 rules  logicmap/sync.md')
+    expect(mapView).toContain('The live document sync.')
+    expect(mapView).not.toContain(ruleIdOf(1))
+    expect(mapView).toContain('The rule ids are left out')
+    expect(mapView).toContain('show --all')
+    expect(showLogicMap(repoRoot, undefined, { isInFull: true })).toContain(ruleIdOf(250))
+
+    const domainView = showLogicMap(repoRoot, 'sync')
+    expect(domainView).toContain(`${ruleIdOf(1)}  decision`)
+    expect(domainView).toContain(`${ruleIdOf(250)}  decision`)
+    expect(domainView).not.toContain('Every word of this claim')
+    expect(domainView).toContain('The claims are left out')
+    expect(domainView).toContain('show sync --all')
+    const domainViewInFull = showLogicMap(repoRoot, 'sync', { isInFull: true })
+    expect(domainViewInFull).toContain(`${ruleIdOf(250)}@1  decision`)
+    expect(domainViewInFull).toContain(
+      'recorded  Every word of this claim is here to make the view of the domain long.  (sites: 0)',
+    )
+  })
+})
+
+describe('find', () => {
+  test("the rules whose id or entry hold every word, an id's hit first; a retired rule never; over thirty, the rest counted", () => {
+    const repoRoot = createFixtureRepo({
+      'src/room.ts': [
+        '// §edge sync.close-during-join@1',
+        'if (closedEarly) {',
+        '}',
+        '// §edge sync.pooled-buffer-slice@1',
+        'const messageBytes = slice',
+        '// §decision sync.a-copy-before-reuse@1',
+        'const copiedBytes = copy(messageBytes)',
+        '',
+      ].join('\n'),
+      'logicmap/sync.md': [
+        closeDuringJoinEntry(1),
+        pooledBufferSliceEntry,
+        '## sync.a-copy-before-reuse',
+        'kind: decision',
+        'version: 1',
+        'what: The bytes are copied before the next message is read.',
+        'why: ws reuses the pooled memory.',
+        'source: inferred — fixture',
+        '',
+        '## sync.old-pooled-rule',
+        'kind: decision',
+        'version: 1',
+        'status: retired',
+        'what: An old pooled rule.',
+        'why: fixture.',
+        'source: fixture',
+        '',
+      ].join('\n'),
+    })
+    ackIds(repoRoot, [
+      'sync.close-during-join',
+      'sync.pooled-buffer-slice',
+      'sync.a-copy-before-reuse',
+      'sync.old-pooled-rule',
+    ])
+    const closeDuringJoinLine =
+      'sync.close-during-join@1  edge  untested  recorded  The socket can close while the join is loading.  (sites: 1)'
+    const pooledBufferSliceLine =
+      'sync.pooled-buffer-slice@1  edge  untested  recorded  ws may hand a message over as a slice of a pooled buffer.  (sites: 1)'
+    const copyBeforeReuseLine =
+      'sync.a-copy-before-reuse@1  decision  ok  inferred  The bytes are copied before the next message is read.  (sites: 1)'
+
+    expect(findInLogicMap(repoRoot, ['during'])).toBe(closeDuringJoinLine)
+    expect(findInLogicMap(repoRoot, ['decoder'])).toBe(pooledBufferSliceLine)
+    expect(findInLogicMap(repoRoot, ['SOCKET', 'Loading'])).toBe(closeDuringJoinLine)
+    expect(findInLogicMap(repoRoot, ['pooled'])).toBe(
+      [pooledBufferSliceLine, copyBeforeReuseLine].join('\n'),
+    )
+    expect(findInLogicMap(repoRoot, ['socket', 'decoder'])).toBe(
+      'no rule holds every word of: socket decoder',
+    )
+
+    writeFixtureFiles(repoRoot, {
+      'logicmap/queue.md': Array.from({ length: 32 }, (_, ruleIndex) =>
+        [
+          `## queue.zebra-rule-${String(ruleIndex + 1).padStart(2, '0')}`,
+          'kind: decision',
+          'version: 1',
+          'what: A rule.',
+          'why: fixture.',
+          'source: fixture',
+          '',
+        ].join('\n'),
+      ).join('\n'),
+    })
+    const zebraLines = findInLogicMap(repoRoot, ['zebra']).split('\n')
+    expect(zebraLines).toHaveLength(31)
+    expect(zebraLines[0]).toStartWith('queue.zebra-rule-01@1  decision')
+    expect(zebraLines[30]).toBe('... and 2 more rules: add a word to narrow them')
   })
 })
 
@@ -1484,6 +1608,227 @@ describe('diff', () => {
     const uncommittedAckDiff = diffLogicMap(repoRoot, 'sync.close-during-join')
     expect(uncommittedAckDiff).toContain('the ack is not committed yet, so from HEAD')
     expect(uncommittedAckDiff).toContain('+  joined.forgetConnection(connection)')
+  })
+
+  test('check gives, under a changed site, the claim and the change, cut at twenty lines; nothing under another problem or past the tenth site', () => {
+    const ruleNumbers = Array.from({ length: 12 }, (_, ruleIndex) =>
+      String(ruleIndex + 1).padStart(2, '0'),
+    )
+    const codeFilesHolding = (value: string): Record<string, string> => ({
+      'src/long.ts': [
+        '// §edge sync.pooled-buffer-slice@1',
+        'if (pooled) {',
+        ...Array.from({ length: 30 }, (_, lineIndex) => `  readByte(${lineIndex}, ${value})`),
+        '}',
+        '',
+      ].join('\n'),
+      'src/room.ts': [
+        '// §edge sync.close-during-join@1',
+        'if (closedEarly) {',
+        `  joined.removeConnection(${value})`,
+        '}',
+        '',
+      ].join('\n'),
+      'src/rules.ts': ruleNumbers
+        .flatMap((ruleNumber) => [
+          `// §decision sync.rule-${ruleNumber}@1`,
+          `const rule${ruleNumber} = ${value}`,
+        ])
+        .join('\n'),
+    })
+    const repoRoot = createFixtureRepo({
+      ...codeFilesHolding('1'),
+      'logicmap/sync.md': [
+        closeDuringJoinEntry(1),
+        pooledBufferSliceEntry,
+        ...ruleNumbers.map((ruleNumber) =>
+          [
+            `## sync.rule-${ruleNumber}`,
+            'kind: decision',
+            'version: 1',
+            'what: A rule.',
+            'why: fixture.',
+            'source: fixture',
+            '',
+          ].join('\n'),
+        ),
+      ].join('\n'),
+    })
+    ackIds(repoRoot, [
+      'sync.close-during-join',
+      'sync.pooled-buffer-slice',
+      ...ruleNumbers.map((ruleNumber) => `sync.rule-${ruleNumber}`),
+    ])
+    commitFixtureRepo(repoRoot, 'ack')
+    writeFixtureFiles(repoRoot, codeFilesHolding('2'))
+
+    const { problems, changeLinesByProblem } = checkRepoWithChanges(repoRoot)
+    const changedProblems = problems.filter((problem) => problem.code === PROBLEM_CODES.changed)
+    const changeLinesByPlace = new Map(
+      changedProblems.map((problem) => [
+        `${problem.file}:${problem.line}`,
+        changeLinesByProblem.get(problem) ?? [],
+      ]),
+    )
+    expect(changedProblems).toHaveLength(14)
+
+    const roomChangeLines = changeLinesByPlace.get('src/room.ts:1') ?? []
+    expect(roomChangeLines[0]).toBe('    claim: The socket can close while the join is loading.')
+    expect(roomChangeLines[1]).toMatch(/^ {4}the change, since the ack in [0-9a-f]+:$/)
+    expect(roomChangeLines).toContain('    -  joined.removeConnection(1)')
+    expect(roomChangeLines).toContain('    +  joined.removeConnection(2)')
+
+    const longChangeLines = changeLinesByPlace.get('src/long.ts:1') ?? []
+    expect(longChangeLines).toHaveLength(23)
+    expect(longChangeLines[22]).toMatch(
+      /^ {4}\.\.\. \d+ more lines: logicmap diff sync\.pooled-buffer-slice$/,
+    )
+
+    expect(changeLinesByPlace.get('src/rules.ts:15')?.[0]).toBe('    claim: A rule.')
+    expect(changeLinesByPlace.get('src/rules.ts:17')).toEqual([
+      '    the claim and the change are printed under the first 10 changed sites: logicmap diff <id> prints any other',
+    ])
+    expect(changeLinesByPlace.get('src/rules.ts:19')).toEqual([])
+    const otherProblems = problems.filter((problem) => problem.code !== PROBLEM_CODES.changed)
+    expect(otherProblems.length).toBeGreaterThan(0)
+    expect(otherProblems.some((problem) => changeLinesByProblem.has(problem))).toBe(false)
+  })
+})
+
+describe('bump', () => {
+  test("the entry's version and history, the defining pin moved, every other site left to re-verify; a flow moves no pin; a retired or unknown id is refused", () => {
+    const repoRoot = createFixtureRepo({
+      'src/room.ts': ['// §edge sync.close-during-join@1', 'if (closedEarly) {', '}', ''].join(
+        '\n',
+      ),
+      'src/routes.ts': [
+        '// §uses sync.close-during-join@1',
+        'joinRoom(socket)',
+        '// §flow sync.open-document@1 #2',
+        'const resolveAccess = () => {}',
+        '',
+      ].join('\n'),
+      'src/room.test.ts': [
+        '// §test sync.close-during-join@1',
+        "test('a socket closed mid-join is removed', () => {})",
+        '',
+      ].join('\n'),
+      'web/provider.ts': [
+        '// §flow sync.open-document@1 #1',
+        'const openSocket = () => {}',
+        '',
+      ].join('\n'),
+      'logicmap/sync.md': [
+        '## sync.close-during-join',
+        'kind: edge',
+        'version: 1',
+        'what: The socket can close while the join is loading.',
+        'why: The join adds the connection before it resolves.',
+        'source: fixture',
+        'history:',
+        '- @1: introduced',
+        '',
+        '## sync.open-document',
+        'kind: flow',
+        'version: 1',
+        'what: Opening a document over the socket.',
+        'why: The steps cross the browser and the server.',
+        'source: fixture',
+        'steps:',
+        '  1. The browser opens the socket.',
+        '  2. The upgrade resolves access.',
+        '',
+        '## sync.old-rule',
+        'kind: decision',
+        'version: 1',
+        'status: retired',
+        'what: An old rule.',
+        'why: fixture.',
+        'source: fixture',
+        '',
+      ].join('\n'),
+    })
+    ackIds(repoRoot, ['sync.close-during-join', 'sync.open-document', 'sync.old-rule'])
+
+    expect(
+      bumpId(repoRoot, 'sync.close-during-join', 'a join that fails removes the socket too'),
+    ).toEqual({
+      isBumped: true,
+      report: [
+        'sync.close-during-join: version 1 → 2 in logicmap/sync.md:1, its history line added, the pin moved at src/room.ts:1.',
+        'Rewrite its what and why to what holds now, then re-verify each site below against it and move its pin to @2:',
+        '  src/routes.ts:1  §uses sync.close-during-join@1',
+        '  src/room.test.ts:1  §test sync.close-during-join@1',
+        'Then: ack sync.close-during-join',
+      ].join('\n'),
+    })
+    expect(readFixtureFile(repoRoot, 'logicmap/sync.md')).toContain(
+      [
+        '## sync.close-during-join',
+        'kind: edge',
+        'version: 2',
+        'what: The socket can close while the join is loading.',
+        'why: The join adds the connection before it resolves.',
+        'source: fixture',
+        'history:',
+        '- @1: introduced',
+        '- @2: a join that fails removes the socket too',
+        '',
+        '## sync.open-document',
+      ].join('\n'),
+    )
+    expect(readFixtureFile(repoRoot, 'src/room.ts')).toStartWith(
+      '// §edge sync.close-during-join@2\n',
+    )
+    expect(readFixtureFile(repoRoot, 'src/routes.ts')).toStartWith(
+      '// §uses sync.close-during-join@1\n',
+    )
+    expect(describeErrors(repoRoot)).toEqual([
+      'stale-pin src/room.test.ts:1',
+      'stale-pin src/routes.ts:1',
+    ])
+
+    const flowBump = bumpId(
+      repoRoot,
+      'sync.open-document',
+      'the upgrade reads the frozen state too',
+    )
+    expect(flowBump.report.split('\n')).toEqual([
+      'sync.open-document: version 1 → 2 in logicmap/sync.md:11, its history line added; a flow has no single definition, so no pin moved.',
+      'Rewrite its what and why to what holds now, then re-verify each site below against it and move its pin to @2:',
+      '  web/provider.ts:1  §flow sync.open-document@1 #1',
+      '  src/routes.ts:3  §flow sync.open-document@1 #2',
+      'Then: ack sync.open-document',
+    ])
+    expect(readFixtureFile(repoRoot, 'logicmap/sync.md')).toContain(
+      [
+        'version: 2',
+        'what: Opening a document over the socket.',
+        'why: The steps cross the browser and the server.',
+        'source: fixture',
+        'steps:',
+        '  1. The browser opens the socket.',
+        '  2. The upgrade resolves access.',
+        'history:',
+        '- @2: the upgrade reads the frozen state too',
+        '',
+        '## sync.old-rule',
+      ].join('\n'),
+    )
+    expect(readFixtureFile(repoRoot, 'web/provider.ts')).toStartWith(
+      '// §flow sync.open-document@1 #1\n',
+    )
+
+    const ledgerTextBeforeRefusals = readFixtureFile(repoRoot, 'logicmap/sync.md')
+    expect(bumpId(repoRoot, 'sync.old-rule', 'anything')).toEqual({
+      isBumped: false,
+      report: 'sync.old-rule is retired: a retired rule is never bumped or reused',
+    })
+    expect(bumpId(repoRoot, 'sync.no-such-rule', 'anything')).toEqual({
+      isBumped: false,
+      report: 'sync.no-such-rule has no entry in logicmap/sync.md',
+    })
+    expect(readFixtureFile(repoRoot, 'logicmap/sync.md')).toBe(ledgerTextBeforeRefusals)
   })
 })
 

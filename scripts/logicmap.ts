@@ -1297,8 +1297,18 @@ const FILE_LINES_TARGET_PATTERN = /^(.+):(\d+)(?:-(\d+))?$/
 
 const countOf = (count: number, noun: string): string => `${count} ${noun}${count === 1 ? '' : 's'}`
 
+// A wide view (every domain, or one domain's rules) prints in full up to this size, about 5,000 tokens.
+const WIDE_VIEW_MAX_CHARACTERS = 20_000
+const SHOW_IN_FULL_FLAG = '--all'
+
+const describeCharacterCount = (text: string): string =>
+  `${text.length.toLocaleString('en-US')} characters`
+
+// find prints this many rules and counts the rest: a search that wide wants another word.
+const FIND_MAX_RULES = 30
+
 const SHOW_LEVELS_HINT =
-  'show <domain>: its rules and their claims; show <id>: one rule and its sites; show <file>[:<line>[-<line>]]: the rules in a file.'
+  'show <domain>: its rules and their claims; show <id>: one rule and its sites; show <file>[:<line>[-<line>]]: the rules in a file; find <word>...: the rules about something.'
 
 // The views an agent reads, from the widest to the narrowest: every domain with its intro and its rule
 // ids; a domain's rules with their claims; one rule's entry and sites; the rules in a file or some of its lines.
@@ -1389,33 +1399,89 @@ const createShowViews = (repoRoot: string) => {
     return domain.intro === '' ? [headingLine] : [headingLine, `  ${domain.intro}`]
   }
 
-  // Each rule by its id alone, plus what differs from the usual: a problem, or a why nobody recorded.
-  const showDomainsMap = (): string => {
+  // A rule by its id, plus what differs from the usual: a problem, or a why nobody recorded.
+  const describeRuleById = (entry: LedgerEntry): string => {
+    const status = entryStatusOf(entry)
+    const statusNote = status === 'ok' ? '' : `  ${status}`
+    const provenanceNote =
+      entry.provenance === ENTRY_PROVENANCES.recorded ? '' : `  ${entry.provenance}`
+    return `${entry.id}  ${entry.kind ?? '?'}${statusNote}${provenanceNote}`
+  }
+
+  const showDomainsMap = (isInFull: boolean): string => {
     const domains = [...analysis.domainsByName.values()]
     const ruleCount = domains.reduce((count, domain) => count + activeEntriesOf(domain).length, 0)
     if (ruleCount === 0) {
       return `no entries in ${LEDGER_DIRECTORY}/ yet`
     }
     const headerLine = `logicmap: ${countOf(ruleCount, 'rule')} in ${countOf(domains.length, 'domain')}. ${SHOW_LEVELS_HINT}`
-    const domainSections = domains.map((domain) => {
-      const ruleLines = activeEntriesOf(domain).map((entry) => {
-        const status = entryStatusOf(entry)
-        const statusNote = status === 'ok' ? '' : `  ${status}`
-        const provenanceNote =
-          entry.provenance === ENTRY_PROVENANCES.recorded ? '' : `  ${entry.provenance}`
-        return `  ${entry.id}  ${entry.kind ?? '?'}${statusNote}${provenanceNote}`
-      })
-      return ['', ...describeDomain(domain), ...ruleLines].join('\n')
-    })
-    return [headerLine, ...domainSections].join('\n')
+    const viewWithRuleIds = [
+      headerLine,
+      ...domains.map((domain) => {
+        const ruleLines = activeEntriesOf(domain).map((entry) => `  ${describeRuleById(entry)}`)
+        return ['', ...describeDomain(domain), ...ruleLines].join('\n')
+      }),
+    ].join('\n')
+    if (isInFull || viewWithRuleIds.length <= WIDE_VIEW_MAX_CHARACTERS) {
+      return viewWithRuleIds
+    }
+    const leftOutLine = `The rule ids are left out: with them this view is ${describeCharacterCount(viewWithRuleIds)}. show <domain> lists a domain's rules, find <word>... the rules about something, show ${SHOW_IN_FULL_FLAG} every id.`
+    const domainSections = domains.map((domain) => ['', ...describeDomain(domain)].join('\n'))
+    return [headerLine, leftOutLine, ...domainSections].join('\n')
   }
 
-  const showOneDomain = (domain: LedgerDomain): string => {
-    const ruleLines = activeEntriesOf(domain).map((entry) => {
-      const siteCount = analysis.anchors.filter((anchor) => anchor.id === entry.id).length
-      return `${entry.id}@${entry.version ?? '?'}  ${entry.kind ?? '?'}  ${entryStatusOf(entry)}  ${entry.provenance}  ${entry.claim}  (sites: ${siteCount})`
-    })
-    return [...describeDomain(domain), ...ruleLines].join('\n')
+  const describeRuleWithClaim = (entry: LedgerEntry): string => {
+    const siteCount = analysis.anchors.filter((anchor) => anchor.id === entry.id).length
+    return `${entry.id}@${entry.version ?? '?'}  ${entry.kind ?? '?'}  ${entryStatusOf(entry)}  ${entry.provenance}  ${entry.claim}  (sites: ${siteCount})`
+  }
+
+  const showOneDomain = (domain: LedgerDomain, isInFull: boolean): string => {
+    const domainRules = activeEntriesOf(domain)
+    const viewWithClaims = [
+      ...describeDomain(domain),
+      ...domainRules.map(describeRuleWithClaim),
+    ].join('\n')
+    if (isInFull || viewWithClaims.length <= WIDE_VIEW_MAX_CHARACTERS) {
+      return viewWithClaims
+    }
+    const leftOutLine = `The claims are left out: with them this view is ${describeCharacterCount(viewWithClaims)}. find <word>... gives the rules about something with their claims, show <id> one rule, show ${domain.name} ${SHOW_IN_FULL_FLAG} every claim.`
+    return [...describeDomain(domain), leftOutLine, ...domainRules.map(describeRuleById)].join('\n')
+  }
+
+  // The active rules whose id or entry hold every word, case ignored: a word in the id first, then in the claim.
+  const findRules = (words: string[]): string => {
+    const searchedWords = words.map((word) => word.toLowerCase())
+    const countWordsHeldBy = (text: string): number => {
+      const lowerCaseText = text.toLowerCase()
+      return searchedWords.filter((searchedWord) => lowerCaseText.includes(searchedWord)).length
+    }
+    const foundEntries = [...analysis.entriesById.values()]
+      .filter(
+        (entry) =>
+          entry.status === ENTRY_STATUSES.active &&
+          countWordsHeldBy(entry.text) === searchedWords.length,
+      )
+      .map((entry) => ({
+        entry,
+        relevance:
+          countWordsHeldBy(entry.id) * (searchedWords.length + 1) + countWordsHeldBy(entry.claim),
+      }))
+      .sort(
+        (first, second) =>
+          second.relevance - first.relevance || first.entry.id.localeCompare(second.entry.id),
+      )
+    if (foundEntries.length === 0) {
+      return `no rule holds every word of: ${words.join(' ')}`
+    }
+    const ruleLines = foundEntries
+      .slice(0, FIND_MAX_RULES)
+      .map(({ entry }) => describeRuleWithClaim(entry))
+    const leftOutCount = foundEntries.length - ruleLines.length
+    const leftOutLines =
+      leftOutCount === 0
+        ? []
+        : [`... and ${countOf(leftOutCount, 'more rule')}: add a word to narrow them`]
+    return [...ruleLines, ...leftOutLines].join('\n')
   }
 
   const showOneId = (id: string): string => {
@@ -1444,6 +1510,7 @@ const createShowViews = (repoRoot: string) => {
     showDomainsMap,
     showOneDomain,
     showOneId,
+    findRules,
     showFileRules,
     listFileRuleSections,
     listReferringRuleSections,
@@ -1453,10 +1520,14 @@ const createShowViews = (repoRoot: string) => {
   }
 }
 
-export const showLogicMap = (repoRoot: string, target: string | undefined): string => {
+export const showLogicMap = (
+  repoRoot: string,
+  target: string | undefined,
+  { isInFull = false }: { isInFull?: boolean } = {},
+): string => {
   const views = createShowViews(repoRoot)
   if (target === undefined) {
-    return views.showDomainsMap()
+    return views.showDomainsMap(isInFull)
   }
   const [, fileOfLines, firstLineText, lastLineText] = FILE_LINES_TARGET_PATTERN.exec(target) ?? []
   if (fileOfLines !== undefined && views.isAnchoredFile(fileOfLines)) {
@@ -1476,7 +1547,7 @@ export const showLogicMap = (repoRoot: string, target: string | undefined): stri
   }
   const domain = views.analysis.domainsByName.get(target)
   if (domain !== undefined) {
-    return views.showOneDomain(domain)
+    return views.showOneDomain(domain, isInFull)
   }
   const unanchoredFile = fileOfLines ?? target
   if (existsSync(join(repoRoot, unanchoredFile))) {
@@ -1484,6 +1555,9 @@ export const showLogicMap = (repoRoot: string, target: string | undefined): stri
   }
   return `nothing named "${target}": not a domain or an id in ${LEDGER_DIRECTORY}/, not a file with anchors`
 }
+
+export const findInLogicMap = (repoRoot: string, words: string[]): string =>
+  createShowViews(repoRoot).findRules(words)
 
 // What the hook asks of the map, from one analysis: every problem check reports; the rules covering some lines of a
 // file (all of it when lines is null), each as show <file> prints it; the rules whose uses or test sites in a file
@@ -1500,6 +1574,116 @@ export const createMapReader = (repoRoot: string) => {
 }
 
 export type MapReader = ReturnType<typeof createMapReader>
+
+// ---------- Bump: the version, the history line and the definition's pin of a rule whose meaning changed ----------
+
+const VERSION_FIELD_PATTERN = /^version:/
+const HISTORY_FIELD_PATTERN = /^history:/
+
+const isEntryFieldLine = (entryLine: string): boolean =>
+  isEntryFieldName(ENTRY_FIELD_PATTERN.exec(entryLine)?.[1])
+
+const pinOf = (role: AnchorRole, id: string, version: number): string => `§${role} ${id}@${version}`
+
+export type BumpOutcome = { isBumped: boolean; report: string }
+
+// What a bump writes by rote. The what and the why stay for whoever knows what holds now, and every other site
+// stays pinned to the old version, so check reports it until it is re-verified.
+export const bumpId = (repoRoot: string, id: string, whatChanged: string): BumpOutcome => {
+  const { anchors, entriesById } = analyzeRepo(repoRoot)
+  const entry = entriesById.get(id)
+  if (entry === undefined) {
+    return {
+      isBumped: false,
+      report: `${id} has no entry in ${LEDGER_DIRECTORY}/${domainOf(id)}.md`,
+    }
+  }
+  if (entry.status === ENTRY_STATUSES.retired) {
+    return { isBumped: false, report: `${id} is retired: a retired rule is never bumped or reused` }
+  }
+  const currentVersion = entry.version
+  if (currentVersion === null) {
+    return { isBumped: false, report: `${id} has no version to bump: fix its version field first` }
+  }
+  const nextVersion = currentVersion + 1
+
+  const ledgerPath = join(repoRoot, entry.file)
+  const ledgerLines = readFileSync(ledgerPath, 'utf8').split('\n')
+  const entryFirstIndex = entry.line - 1
+  const entryLines = ledgerLines.slice(
+    entryFirstIndex,
+    entryFirstIndex + entry.text.split('\n').length,
+  )
+  const historyOffset = entryLines.findIndex((entryLine) => HISTORY_FIELD_PATTERN.test(entryLine))
+  const hasHistory = historyOffset !== -1
+  const fieldAfterHistoryOffset = entryLines.findIndex(
+    (entryLine, lineOffset) =>
+      hasHistory && lineOffset > historyOffset && isEntryFieldLine(entryLine),
+  )
+  const historyEndOffset =
+    fieldAfterHistoryOffset === -1 ? entryLines.length : fieldAfterHistoryOffset
+  const newHistoryLine = `- @${nextVersion}: ${whatChanged}`
+  const bumpedEntryLines = entryLines
+    .map((entryLine) =>
+      VERSION_FIELD_PATTERN.test(entryLine) ? `version: ${nextVersion}` : entryLine,
+    )
+    .toSpliced(
+      historyEndOffset,
+      0,
+      ...(hasHistory ? [newHistoryLine] : ['history:', newHistoryLine]),
+    )
+  writeFileSync(
+    ledgerPath,
+    ledgerLines.toSpliced(entryFirstIndex, entryLines.length, ...bumpedEntryLines).join('\n'),
+  )
+
+  const ruleAnchors = anchors.filter((anchor) => anchor.id === id).sort(bySiteOrder)
+  const isFlow = entry.kind === ENTRY_KINDS.flow
+  const definingAnchors = isFlow
+    ? []
+    : ruleAnchors.filter(
+        (anchor) => isDefiningRole(anchor.role) && anchor.version === currentVersion,
+      )
+  for (const definingAnchor of definingAnchors) {
+    const codePath = join(repoRoot, definingAnchor.file)
+    const repinnedLines = readFileSync(codePath, 'utf8')
+      .split('\n')
+      .map((codeLine, lineIndex) =>
+        lineIndex === definingAnchor.line - 1
+          ? codeLine.replace(
+              pinOf(definingAnchor.role, id, currentVersion),
+              pinOf(definingAnchor.role, id, nextVersion),
+            )
+          : codeLine,
+      )
+    writeFileSync(codePath, repinnedLines.join('\n'))
+  }
+
+  const describePlace = (anchor: Anchor): string => `${anchor.file}:${anchor.line}`
+  const pinNote = isFlow
+    ? '; a flow has no single definition, so no pin moved.'
+    : definingAnchors.length === 0
+      ? `; no defining anchor pins @${currentVersion}, so no pin moved.`
+      : `, the pin moved at ${definingAnchors.map(describePlace).join(', ')}.`
+  const sitesToReverify = ruleAnchors.filter((anchor) => !definingAnchors.includes(anchor))
+  const rewriteLines =
+    sitesToReverify.length === 0
+      ? ['Rewrite its what and why to what holds now. No other site pins it.']
+      : [
+          `Rewrite its what and why to what holds now, then re-verify each site below against it and move its pin to @${nextVersion}:`,
+          ...sitesToReverify.map(
+            (anchor) => `  ${describePlace(anchor)}  ${describeAnchor(anchor)}`,
+          ),
+        ]
+  return {
+    isBumped: true,
+    report: [
+      `${id}: version ${currentVersion} → ${nextVersion} in ${entry.file}:${entry.line}, its history line added${pinNote}`,
+      ...rewriteLines,
+      `Then: ack ${id}`,
+    ].join('\n'),
+  }
+}
 
 // ---------- Diff: what changed under a rule's sites since their last ack ----------
 
@@ -1641,6 +1825,25 @@ const hunksMeetingLines = (diffText: string, lines: LineRange): string[] =>
     )
   })
 
+const NO_HUNK_LINE = 'no hunk meets these lines (an untracked file has no diff)'
+
+// Since when a changed site is compared, and the hunks of its file's diff from then that meet its lines.
+const describeSiteChange = (
+  repoRoot: string,
+  lockSite: LockSite,
+  lockedSite: LockedSite,
+): { sinceNote: string; siteLines: LineRange; hunks: string[] } => {
+  const lockLine = `${lockSite.key} ${lockedSite.version} ${lockedSite.fingerprint}`
+  const ackCommit = findAckCommit(repoRoot, lockedSite.file, lockLine)
+  const sinceNote =
+    ackCommit === null
+      ? 'the ack is not committed yet, so from HEAD'
+      : `since the ack in ${ackCommit}`
+  const diffText = runGit(repoRoot, ['diff', '-U2', ackCommit ?? 'HEAD', '--', lockSite.file])
+  const siteLines = { firstLine: lockSite.line, lastLine: lockSite.lastLine }
+  return { sinceNote, siteLines, hunks: hunksMeetingLines(diffText, siteLines) }
+}
+
 // For each site of the id whose code or entry differs from its lock line, the git diff of its file from
 // the commit of its ack, the hunks that meet its lines: what to re-read before acking it again.
 export const diffLogicMap = (repoRoot: string, id: string): string => {
@@ -1653,23 +1856,66 @@ export const diffLogicMap = (repoRoot: string, id: string): string => {
       if (lockedSite === undefined || isAsLocked(lockSite, lockedSite)) {
         return []
       }
-      const lockLine = `${lockSite.key} ${lockedSite.version} ${lockedSite.fingerprint}`
-      const ackCommit = findAckCommit(repoRoot, lockedSite.file, lockLine)
-      const sinceNote =
-        ackCommit === null
-          ? 'the ack is not committed yet, so from HEAD'
-          : `since the ack in ${ackCommit}`
-      const diffText = runGit(repoRoot, ['diff', '-U2', ackCommit ?? 'HEAD', '--', lockSite.file])
-      const siteLines = { firstLine: lockSite.line, lastLine: lockSite.lastLine }
-      const hunks = hunksMeetingLines(diffText, siteLines)
-      const hunkLines =
-        hunks.length === 0 ? ['  no hunk meets these lines (an untracked file has no diff)'] : hunks
+      const { sinceNote, siteLines, hunks } = describeSiteChange(repoRoot, lockSite, lockedSite)
+      const hunkLines = hunks.length === 0 ? [`  ${NO_HUNK_LINE}`] : hunks
       const headingLine = `${lockSite.file}:${describeLineRange(siteLines)}  ${lockSite.label}, ${sinceNote}:`
       return [[headingLine, ...hunkLines].join('\n').trimEnd()]
     })
   return changedSiteSections.length === 0
     ? `${id}: no site in the lock changed since its last ack`
     : changedSiteSections.join('\n\n')
+}
+
+// check prints the claim and the change under this many changed sites, this many lines of diff each.
+const CHANGES_MAX_DESCRIBED = 10
+const CHANGE_MAX_DIFF_LINES = 20
+const CHANGE_INDENT = '    '
+
+// Every problem check reports and, for a changed site, what the ack after it is given against: the rule's claim
+// and the diff under the site since its ack.
+export const checkRepoWithChanges = (
+  repoRoot: string,
+): { problems: Problem[]; changeLinesByProblem: Map<Problem, string[]> } => {
+  const analysis = analyzeRepo(repoRoot)
+  const problems = findAllProblems(repoRoot, analysis)
+  const lockedSitesByKey = readLock(repoRoot)
+  const describeChange = (changedProblem: Problem): string[] => {
+    const lockSite = analysis.lockSites.find(
+      (candidateSite) =>
+        candidateSite.id === changedProblem.id &&
+        candidateSite.file === changedProblem.file &&
+        candidateSite.line === changedProblem.line,
+    )
+    const lockedSite = lockSite === undefined ? undefined : lockedSitesByKey.get(lockSite.key)
+    if (lockSite === undefined || lockedSite === undefined) {
+      return []
+    }
+    const claim = analysis.entriesById.get(lockSite.id)?.claim ?? ''
+    const { sinceNote, hunks } = describeSiteChange(repoRoot, lockSite, lockedSite)
+    const diffLines = hunks.flatMap((hunkText) => hunkText.trimEnd().split('\n'))
+    const leftOutCount = diffLines.length - CHANGE_MAX_DIFF_LINES
+    const leftOutLines =
+      leftOutCount > 0
+        ? [`... ${countOf(leftOutCount, 'more line')}: logicmap diff ${lockSite.id}`]
+        : []
+    return [
+      `claim: ${claim}`,
+      `the change, ${sinceNote}:`,
+      ...(diffLines.length === 0 ? [NO_HUNK_LINE] : diffLines.slice(0, CHANGE_MAX_DIFF_LINES)),
+      ...leftOutLines,
+    ].map((changeLine) => `${CHANGE_INDENT}${changeLine}`)
+  }
+  const restNoteLine = `${CHANGE_INDENT}the claim and the change are printed under the first ${CHANGES_MAX_DESCRIBED} changed sites: logicmap diff <id> prints any other`
+  const changeLinesByProblem = new Map(
+    problems
+      .filter((problem) => problem.code === PROBLEM_CODES.changed)
+      .slice(0, CHANGES_MAX_DESCRIBED + 1)
+      .map((changedProblem, changedIndex): [Problem, string[]] => [
+        changedProblem,
+        changedIndex < CHANGES_MAX_DESCRIBED ? describeChange(changedProblem) : [restNoteLine],
+      ]),
+  )
+  return { problems, changeLinesByProblem }
 }
 
 // ---------- Why: the commits that changed some lines, and the reasons recorded with them ----------
@@ -2332,11 +2578,17 @@ export const whyLogicMap = (repoRoot: string, target: string): string => {
 // ---------- Command line ----------
 
 const USAGE = [
-  'usage: bun logicmap.ts check              every problem, one per line; exit 1 on any error',
+  'usage: bun logicmap.ts check              every problem, one per line, a changed site with its claim and its',
+  '                                           change under it; exit 1 on any error',
   "       bun logicmap.ts ack <id>...         record these ids' code and entries as verified",
   '       bun logicmap.ts ack --renamed       ack every id whose only errors are renames, after reading them',
-  '       bun logicmap.ts show [<domain> | <id> | <file>[:<line>[-<line>]]]',
-  "                                           every domain; a domain's rules; one rule and its sites; a file's rules",
+  "       bun logicmap.ts bump <id> <what changed>   the entry's version + 1, a history line, the definition's pin",
+  '                                           moved; lists the other sites to re-verify. Its what and why are yours',
+  '       bun logicmap.ts show [<domain> | <id> | <file>[:<line>[-<line>]]] [--all]',
+  "                                           every domain; a domain's rules; one rule and its sites; a file's rules.",
+  '                                           A view of the first two over 20,000 characters leaves the ids, or the',
+  '                                           claims, out; --all prints them',
+  '       bun logicmap.ts find <word>...      the rules whose id or entry hold every word, with their claims',
   "       bun logicmap.ts diff <id>           what changed under the id's sites since their last ack",
   '       bun logicmap.ts why <file>:<line>[-<line>] | <file>:<name> | <id>',
   '                                           the rules over these lines, every commit that changed them, newest',
@@ -2367,8 +2619,13 @@ const runCommandLine = (commandLineArguments: string[]): number => {
   const [command, ...commandArguments] = commandLineArguments
   const repoRoot = findRepoRoot()
   if (command === 'check') {
-    const problems = checkRepo(repoRoot)
-    problems.forEach(printProblem)
+    const { problems, changeLinesByProblem } = checkRepoWithChanges(repoRoot)
+    for (const problem of problems) {
+      printProblem(problem)
+      for (const changeLine of changeLinesByProblem.get(problem) ?? []) {
+        console.log(changeLine)
+      }
+    }
     const errorCount = problems.filter(
       (problem) => problem.severity === PROBLEM_SEVERITIES.error,
     ).length
@@ -2393,6 +2650,12 @@ const runCommandLine = (commandLineArguments: string[]): number => {
     console.log(`logicmap: acked ${ackedIds.join(', ')}`)
     return 0
   }
+  if (command === 'bump' && commandArguments.length > 1) {
+    const [id = '', ...whatChangedWords] = commandArguments
+    const { isBumped, report } = bumpId(repoRoot, id, whatChangedWords.join(' '))
+    console.log(report)
+    return isBumped ? 0 : 1
+  }
   if (command === 'diff' && commandArguments.length === 1) {
     console.log(diffLogicMap(repoRoot, commandArguments[0] ?? ''))
     return 0
@@ -2401,10 +2664,18 @@ const runCommandLine = (commandLineArguments: string[]): number => {
     console.log(whyLogicMap(repoRoot, toShowTarget(repoRoot, commandArguments[0] ?? '')))
     return 0
   }
+  if (command === 'find' && commandArguments.length > 0) {
+    const words = commandArguments.flatMap((typedWords) => typedWords.split(/\s+/)).filter(Boolean)
+    console.log(findInLogicMap(repoRoot, words))
+    return 0
+  }
   if (command === 'show') {
-    const [typedTarget] = commandArguments
+    const isInFull = commandArguments.includes(SHOW_IN_FULL_FLAG)
+    const [typedTarget] = commandArguments.filter(
+      (commandArgument) => commandArgument !== SHOW_IN_FULL_FLAG,
+    )
     const target = typedTarget === undefined ? undefined : toShowTarget(repoRoot, typedTarget)
-    console.log(showLogicMap(repoRoot, target))
+    console.log(showLogicMap(repoRoot, target, { isInFull }))
     return 0
   }
   console.log(USAGE)

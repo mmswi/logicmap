@@ -25,18 +25,26 @@ The checker, run from anywhere inside the repo:
 bun ~/.claude/skills/logicmap/scripts/logicmap.ts check
 bun ~/.claude/skills/logicmap/scripts/logicmap.ts ack <id>...
 bun ~/.claude/skills/logicmap/scripts/logicmap.ts ack --renamed
-bun ~/.claude/skills/logicmap/scripts/logicmap.ts show [<domain> | <id> | <file>[:<line>[-<line>]]]
+bun ~/.claude/skills/logicmap/scripts/logicmap.ts bump <id> <what changed>
+bun ~/.claude/skills/logicmap/scripts/logicmap.ts show [<domain> | <id> | <file>[:<line>[-<line>]]] [--all]
+bun ~/.claude/skills/logicmap/scripts/logicmap.ts find <word>...
 bun ~/.claude/skills/logicmap/scripts/logicmap.ts diff <id>
 bun ~/.claude/skills/logicmap/scripts/logicmap.ts why <file>:<line>[-<line>] | <file>:<name> | <id>
 ```
 
-`show` reads the map from the widest view to the narrowest, each a few thousand tokens at most:
+`show` reads the map from the widest view to the narrowest:
 
 - `show`: every domain with its intro and its rule ids. Start here on a cold start.
 - `show <domain>`: the domain's rules, each with its claim (the first sentence of its `what`).
+  These two views print in full up to 20,000 characters. A longer one leaves the rule ids (`show`) or the claims
+  (`show <domain>`) out and says so in its second line; `--all` prints it in full.
 - `show <id>`: one entry in full and every site, as `file:start-end`, flow steps in order.
 - `show <file>`: each rule in the file once, with the lines each of its sites covers.
 - `show <file>:<line>` or `<file>:<start>-<end>`: only the rules covering those lines.
+
+`find <word>...` lists the rules whose id or entry hold every word, case ignored, each with its claim and status:
+the way to the rules about something (`find viewer rename`) when no file is known yet. A word in an id comes first;
+past 30 rules it counts the rest, and another word narrows them.
 
 `why` says why code is as it is and how it got there, from git and the pieces recorded with each commit:
 
@@ -87,14 +95,16 @@ the lines is where to look.
 
 After every edit to anchored code, run `check` and resolve each line it prints:
 
-- `changed` or `unacked`: re-read the entry against the new code; `diff <id>` prints what changed under
-  each such site since its last ack. When the message says the anchor covers more than 60 lines and the
-  edit was beside the rule, move the anchor to the smaller block that holds the rule.
+- `changed` or `unacked`: re-read the entry against the new code. Under a `changed` site `check` prints the rule's
+  claim and the change since its last ack (20 lines of it, for the first 10 changed sites); `diff <id>` prints all
+  of it, and `show <id>` the whole entry. An ack says the entry was read against that change. When the message says
+  the anchor covers more than 60 lines and the edit was beside the rule, move the anchor to the smaller block that
+  holds the rule.
   - The entry still holds → `ack <id>`.
-  - The entry no longer holds → **bump**: in the entry set `version: N+1`, rewrite `what` / `why`, add a
-    `history:` line; move the definition anchor's pin to `@N+1`. `check` now reports every other site as
-    `stale-pin`: open each, re-verify it against the new entry, fix the code if needed, move its pin.
-    Then `ack <id>`.
+  - The entry no longer holds → **bump**: `bump <id> <what changed>` sets the entry's `version: N+1`, adds the
+    `history:` line and moves the definition anchor's pin to `@N+1` (a flow's pins all stay). Then rewrite the
+    entry's `what` / `why` to what holds now. `check` reports every other site as `stale-pin`, and `bump` lists
+    them: open each, re-verify it against the new entry, fix the code if needed, move its pin. Then `ack <id>`.
 - `renamed`: the code changed only by words renamed one for one; the message lists them, `old → new`
   (`diff <id>` shows them when no commit holds the acked code). Read the list. Each new name for the same
   thing → `ack --renamed`, which acks every id whose only errors are renames. A new name that points at

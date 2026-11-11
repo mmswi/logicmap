@@ -47,9 +47,15 @@ logicmap.ts show                         every domain, its intro and its rule id
 logicmap.ts show <domain>                the domain's rules, each with its claim
 logicmap.ts show <id>                    one rule in full and every site, with the lines it covers
 logicmap.ts show <file>[:<line>[-<line>]]  the rules in a file, or covering those lines
-logicmap.ts check                        every disagreement; exits 1 on any error
+logicmap.ts show [<domain>] --all        the first two views in full: over 20,000 characters they leave the
+                                         rule ids, or the claims, out
+logicmap.ts find <word>...               the rules whose id or entry hold every word, with their claims
+logicmap.ts check                        every disagreement, a changed site with its rule's claim and the
+                                         change under it; exits 1 on any error
 logicmap.ts ack <id>...                  record that you re-read these rules against their code
 logicmap.ts ack --renamed                ack every rule whose code only had words renamed, once you read them
+logicmap.ts bump <id> <what changed>     a rule whose meaning changed: its version + 1, a history line, the
+                                         definition's pin moved, the other sites listed to re-verify
 logicmap.ts diff <id>                    what changed under the id's sites since their last ack
 logicmap.ts why <file>:<line>[-<line>]   the rules over the lines, then every commit that changed them,
                                          newest first, with the piece and the goal recorded with each
