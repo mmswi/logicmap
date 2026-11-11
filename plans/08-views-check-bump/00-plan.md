@@ -68,4 +68,42 @@ Seam: `bumpId(repoRoot, id, whatChanged)`.
 - [x] Measured on teamabled: the sizes of `show`, `show documents`, a `find`; `check` and `bump` on a scratch copy.
 Files: `SKILL.md`, `README.md`
 
+### 6. `check` in a repo with no commit
+- [x] Red: a site changed before the repo's first commit: `check` lists its `changed` error, with the claim and
+  no hunk.
+- [x] Green: the site's diff through `runGitOrEmpty`.
+Files: `scripts/logicmap.ts`, `scripts/logicmap.test.ts`
+Seam: `checkRepoWithChanges(repoRoot)`.
+
+### 7. `bump` writes one history line, into its own entry
+- [x] Red: a reason holding a newline is written on one line, and the version stays N+1; an empty reason is
+  refused and nothing is written.
+- [x] Green: the reason's whitespace collapsed; an empty one refused.
+Files: `scripts/logicmap.ts`, `scripts/logicmap.test.ts`
+Seam: `bumpId(repoRoot, id, whatChanged)`.
+
+### 8. A site bumped since its ack says so
+- [x] Red: right after `bump`, the entry's and the definition's `changed` errors say the rule was bumped and
+  what is left (re-verify the `stale-pin` sites, ack), not "bump its version".
+- [x] Green: a site whose version is past its lock line's gets that message.
+Files: `scripts/logicmap.ts`, `scripts/logicmap.test.ts`
+Seam: `checkRepo(repoRoot)` after `bumpId`.
+
+### 9. `find` with no word
+- [x] Red: `findInLogicMap(repoRoot, [])` asks for a word.
+- [x] Green: `findRules` with no word says so.
+Files: `scripts/logicmap.ts`, `scripts/logicmap.test.ts`
+Seam: `findInLogicMap`.
+
 ## Revisions
+- 2026-11-11, the review of 674a341..b1bb974 (mihai-code-review, each finding reproduced):
+  - CRITICAL, blast-radius and data, a third reviewer failed to refute it: `check` crashed in a repo with no
+    commit, where it listed the problems before step 3 (`git diff HEAD` through `runGit`). Step 6 added.
+  - data: a `bump` reason holding a newline wrote fields into the entry (`version: 9` overrode the bump); an
+    empty reason wrote `- @2: `. Step 7 added. Left (timing): a check that the entry's heading is still at its line
+    before the write (the ledger edited between the analysis and the write, a window of the analysis's 0.4 s, which
+    no test can stop at; a wrong write shows in `check` and `git diff`), and writing the ledger after the pins
+    (either order leaves a state `check` reports and a rerun repairs).
+  - The trial of the shorter skill: right after `bump`, `check` said "bump its version" for the rule just
+    bumped. Step 8 added.
+  - data, a suggestion: `find ""` listed the first 30 rules. Step 9 added.

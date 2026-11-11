@@ -1454,6 +1454,16 @@ describe('find', () => {
     expect(zebraLines[0]).toStartWith('queue.zebra-rule-01@1  decision')
     expect(zebraLines[30]).toBe('... and 2 more rules: add a word to narrow them')
   })
+
+  test('a find with no word asks for one', () => {
+    const repoRoot = createFixtureRepo({
+      'src/room.ts': ['// §edge sync.close-during-join@1', 'if (closedEarly) {', '}', ''].join(
+        '\n',
+      ),
+      'logicmap/sync.md': closeDuringJoinEntry(1),
+    })
+    expect(findInLogicMap(repoRoot, [])).toBe('find needs a word: logicmap find <word>...')
+  })
 })
 
 describe('provenance', () => {
@@ -1693,6 +1703,31 @@ describe('diff', () => {
     expect(otherProblems.length).toBeGreaterThan(0)
     expect(otherProblems.some((problem) => changeLinesByProblem.has(problem))).toBe(false)
   })
+
+  test('check in a repo with no commit lists a changed site, with its claim and no hunk', () => {
+    const roomCodeHolding = (value: string): string =>
+      [
+        '// §edge sync.close-during-join@1',
+        'if (closedEarly) {',
+        `  joined.removeConnection(${value})`,
+        '}',
+        '',
+      ].join('\n')
+    const repoRoot = createFixtureRepo({
+      'src/room.ts': roomCodeHolding('1'),
+      'logicmap/sync.md': closeDuringJoinEntry(1),
+    })
+    ackIds(repoRoot, ['sync.close-during-join'])
+    writeFixtureFiles(repoRoot, { 'src/room.ts': roomCodeHolding('2') })
+
+    const { problems, changeLinesByProblem } = checkRepoWithChanges(repoRoot)
+    const changedProblem = problems.find((problem) => problem.code === PROBLEM_CODES.changed)
+    const changeLines =
+      changedProblem === undefined ? [] : (changeLinesByProblem.get(changedProblem) ?? [])
+    expect(changedProblem?.file).toBe('src/room.ts')
+    expect(changeLines[0]).toBe('    claim: The socket can close while the join is loading.')
+    expect(changeLines.at(-1)).toBe('    no hunk meets these lines (an untracked file has no diff)')
+  })
 })
 
 describe('bump', () => {
@@ -1829,6 +1864,60 @@ describe('bump', () => {
       report: 'sync.no-such-rule has no entry in logicmap/sync.md',
     })
     expect(readFixtureFile(repoRoot, 'logicmap/sync.md')).toBe(ledgerTextBeforeRefusals)
+  })
+
+  test('a bump reason is written on one history line; an empty reason is refused', () => {
+    const repoRoot = createFixtureRepo({
+      'src/room.ts': ['// §edge sync.close-during-join@1', 'if (closedEarly) {', '}', ''].join(
+        '\n',
+      ),
+      'logicmap/sync.md': closeDuringJoinEntry(1),
+    })
+    ackIds(repoRoot, ['sync.close-during-join'])
+
+    const ledgerTextBeforeRefusal = readFixtureFile(repoRoot, 'logicmap/sync.md')
+    expect(bumpId(repoRoot, 'sync.close-during-join', ' \n ')).toEqual({
+      isBumped: false,
+      report: 'a bump says what changed: logicmap bump <id> <what changed>',
+    })
+    expect(readFixtureFile(repoRoot, 'logicmap/sync.md')).toBe(ledgerTextBeforeRefusal)
+
+    bumpId(repoRoot, 'sync.close-during-join', 'the join is undone\nversion: 9')
+    expect(readFixtureFile(repoRoot, 'logicmap/sync.md')).toBe(
+      [
+        '## sync.close-during-join',
+        'kind: edge',
+        'version: 2',
+        'what: The socket can close while the join is loading.',
+        'why: The join adds the connection before it resolves.',
+        'source: fixture',
+        'history:',
+        '- @2: the join is undone version: 9',
+        '',
+      ].join('\n'),
+    )
+  })
+
+  test('right after a bump, check says the rule was bumped and what is left, not to bump it', () => {
+    const repoRoot = createFixtureRepo({
+      'src/room.ts': ['// §edge sync.close-during-join@1', 'if (closedEarly) {', '}', ''].join(
+        '\n',
+      ),
+      'src/routes.ts': ['// §uses sync.close-during-join@1', 'joinRoom(socket)', ''].join('\n'),
+      'logicmap/sync.md': closeDuringJoinEntry(1),
+    })
+    ackIds(repoRoot, ['sync.close-during-join'])
+    bumpId(repoRoot, 'sync.close-during-join', 'a join that fails removes the socket too')
+
+    const bumpedMessages = checkRepo(repoRoot)
+      .filter((problem) => problem.code === PROBLEM_CODES.changed)
+      .map((problem) => problem.message)
+    const whatIsLeft =
+      'since the last ack: once its what and why say what holds now and each stale-pin site is re-verified and pinned @2, ack sync.close-during-join.'
+    expect(bumpedMessages).toEqual([
+      `the entry sync.close-during-join was bumped from @1 to @2 ${whatIsLeft}`,
+      `the code under §edge sync.close-during-join@2 was bumped from @1 to @2 ${whatIsLeft}`,
+    ])
   })
 })
 

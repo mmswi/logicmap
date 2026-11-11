@@ -1005,7 +1005,11 @@ const checkLock = (
     }
     if (isOwnKeyFree) {
       claimedKeys.add(lockSite.key)
-      const message = `${lockSite.label} changed since the last ack: re-read the entry ${lockSite.id}; it still holds → ack ${lockSite.id}; its meaning changed → bump its version.${longBlockHintOf(lockSite)}`
+      const lockedVersion = lockedSitesByKey.get(lockSite.key)?.version ?? lockSite.version
+      const isBumpedSinceAck = lockSite.version > lockedVersion
+      const message = isBumpedSinceAck
+        ? `${lockSite.label} was bumped from @${lockedVersion} to @${lockSite.version} since the last ack: once its what and why say what holds now and each stale-pin site is re-verified and pinned @${lockSite.version}, ack ${lockSite.id}.`
+        : `${lockSite.label} changed since the last ack: re-read the entry ${lockSite.id}; it still holds → ack ${lockSite.id}; its meaning changed → bump its version.${longBlockHintOf(lockSite)}`
       problems.push(errorAt(PROBLEM_CODES.changed, lockSite, lockSite.id, message))
       continue
     }
@@ -1450,6 +1454,9 @@ const createShowViews = (repoRoot: string) => {
 
   // The active rules whose id or entry hold every word, case ignored: a word in the id first, then in the claim.
   const findRules = (words: string[]): string => {
+    if (words.length === 0) {
+      return 'find needs a word: logicmap find <word>...'
+    }
     const searchedWords = words.map((word) => word.toLowerCase())
     const countWordsHeldBy = (text: string): number => {
       const lowerCaseText = text.toLowerCase()
@@ -1590,6 +1597,13 @@ export type BumpOutcome = { isBumped: boolean; report: string }
 // What a bump writes by rote. The what and the why stay for whoever knows what holds now, and every other site
 // stays pinned to the old version, so check reports it until it is re-verified.
 export const bumpId = (repoRoot: string, id: string, whatChanged: string): BumpOutcome => {
+  const historyReason = collapseWhitespace(whatChanged)
+  if (historyReason === '') {
+    return {
+      isBumped: false,
+      report: 'a bump says what changed: logicmap bump <id> <what changed>',
+    }
+  }
   const { anchors, entriesById } = analyzeRepo(repoRoot)
   const entry = entriesById.get(id)
   if (entry === undefined) {
@@ -1622,7 +1636,7 @@ export const bumpId = (repoRoot: string, id: string, whatChanged: string): BumpO
   )
   const historyEndOffset =
     fieldAfterHistoryOffset === -1 ? entryLines.length : fieldAfterHistoryOffset
-  const newHistoryLine = `- @${nextVersion}: ${whatChanged}`
+  const newHistoryLine = `- @${nextVersion}: ${historyReason}`
   const bumpedEntryLines = entryLines
     .map((entryLine) =>
       VERSION_FIELD_PATTERN.test(entryLine) ? `version: ${nextVersion}` : entryLine,
@@ -1839,7 +1853,13 @@ const describeSiteChange = (
     ackCommit === null
       ? 'the ack is not committed yet, so from HEAD'
       : `since the ack in ${ackCommit}`
-  const diffText = runGit(repoRoot, ['diff', '-U2', ackCommit ?? 'HEAD', '--', lockSite.file])
+  const diffText = runGitOrEmpty(repoRoot, [
+    'diff',
+    '-U2',
+    ackCommit ?? 'HEAD',
+    '--',
+    lockSite.file,
+  ])
   const siteLines = { firstLine: lockSite.line, lastLine: lockSite.lastLine }
   return { sinceNote, siteLines, hunks: hunksMeetingLines(diffText, siteLines) }
 }
