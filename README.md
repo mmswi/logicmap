@@ -16,8 +16,9 @@ rejected, or why a line that looks redundant is there. A logicmap records that, 
 An entry can name, with `grep:`, the message its rule governs (a live frame, a job): every line that
 sends or reads it must then sit under an anchor of the rule.
 
-`SKILL.md` is the full method. `mapping-an-existing-repo.md` is the procedure for a codebase where
-nobody wrote the reasons down.
+`SKILL.md` is what an agent follows on every read and edit of mapped code. Beside it, each read at its moment:
+`anchors-and-entries.md` (the formats), `working-a-task.md`, `the-hook.md`, `setting-up-a-repo.md`, and
+`mapping-an-existing-repo.md`, the procedure for a codebase where nobody wrote the reasons down.
 
 ## Install
 
@@ -69,11 +70,11 @@ In Claude Code, `scripts/hook.ts` adds the rules covering the lines an agent rea
 change of those lines, the problems an edit leaves and the rules its `uses` and `test` sites rely on, and
 `check`'s errors at the end of a turn. It answers the Read and Edit tools and shell commands alike: a
 `sed -n 40,60p <file>` is a read of those lines, and a file a command changed is an edit. To install it, see
-"The hook" in `SKILL.md`.
+`the-hook.md`.
 
-To set it up in a repo, follow "Setting it up in a repo" in `SKILL.md`. To work a task in a mapped
+To set it up in a repo, follow `setting-up-a-repo.md`. To work a task in a mapped
 repo (a plan whose steps name the rules they touch, decisions recorded when the user makes them, each
-piece of code recorded with the reason it was written), follow "Working a task in a mapped repo".
+piece of code recorded with the reason it was written), follow `working-a-task.md`.
 
 ## Tests
 

@@ -41,7 +41,7 @@ an alternative you imagined was never rejected by anyone.
      event emitters and listeners, cron jobs, database triggers.
    Done when every candidate has a `file:line` and the evidence found for it, or "none found".
 3. **Write each entry** with the three claims kept apart: `what` from the code, `why` with its evidence
-   or "not recorded", `source: inferred — ...`. Then place the anchors (SKILL.md, "Adding anchors").
+   or "not recorded", `source: inferred — ...`. Then place the anchors (SKILL.md, "Adding anchors"; the formats: `anchors-and-entries.md`).
    Done when `check` reports no error except `unacked`.
 4. **Ack.** Here `ack` records that the entry matches the code as you read it. The intent stays
    unconfirmed, and `source: inferred` keeps saying so to every later reader.

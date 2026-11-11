@@ -15,9 +15,7 @@ records exactly that knowledge and ties it to the code with three parts:
 - **lock**: `logicmap/<domain>.lock` beside each ledger file, a fingerprint of the code under every
   defining anchor (`decision`, `invariant`, `edge`, `flow`) and of every entry, so the checker knows
   when code changed under a rationale nobody re-read. A `uses` or `test` site is not in it: its version
-  pin is all it claims, and `stale-pin` checks that. Only `ack` writes the lock, and an ack rewrites only
-  the lock of its own domain. A repo with the single `logicmap/lock` of earlier versions is read as is,
-  and split by its next ack.
+  pin is all it claims, and `stale-pin` checks that. Only `ack` writes the lock.
 
 The checker, run from anywhere inside the repo:
 
@@ -137,21 +135,22 @@ An anchor earns its place when at least one holds:
 
 - code relies on something enforced in another file and nothing in the names links them: a mirrored
   constant under a different name, a check made on the other side of a socket, queue or HTTP call →
-  `invariant` at the enforcing site, `uses` at each relying site;
+  `invariant` at the enforcing site, `uses` at each relying site. `check` fingerprints the enforcing side only,
+  so a mirrored constant also gets a test comparing both sides wherever a test can import both;
 - code looks redundant or wrong but is right → `edge`;
 - a reasonable alternative was rejected and an agent could bring it back → `decision`;
 - a process crosses files or processes where no call graph follows it (HTTP, websocket, queue, event,
   cron) → `flow`, one anchor per step;
-- a message crosses processes and every sender and reader must agree on it (a live frame, a job, a key
-  mirrored across a boundary) → its rule gets a `grep:` that matches the message's name, and every line
-  naming it is a site: `check` reports the ones under no anchor of the rule.
+- a message crosses processes and every sender and reader must agree on it (a live frame, a job), named the
+  same way at every site → its rule gets a `grep:` that matches that name, and every line naming it is a site:
+  `check` reports the ones under no anchor of the rule.
 
 Grep already finds the callers of a function by its name; anchors carry the links grep cannot see.
 Most files need none; the few files where rules and flows meet carry several.
 
 1. Pick the id: `<domain>.<claim-or-subject>`, kebab case, the domain names the ledger file. Name the
    rule: `sync.close-during-join`, `access.not-found-not-forbidden`.
-2. Write the entry (format below). When nothing records why the code is this way (an old or
+2. Write the entry (its short form is below). When nothing records why the code is this way (an old or
    handed-over codebase), follow `mapping-an-existing-repo.md` in this skill's folder: it separates
    what you can see from what you infer, and ends with the user confirming the intent.
 3. Put the definition anchor on the comment line above the smallest block that holds the whole rule, or
@@ -164,274 +163,46 @@ Most files need none; the few files where rules and flows meet carry several.
 
 Done when `check` exits 0 and `show <id>` lists every site you meant.
 
-## Anchor grammar
+The forms, in short. All of it, with what `check` enforces, is `anchors-and-entries.md` beside this file: read it
+before the first anchor or entry you write in a session, and when `check` reports a format error its message does
+not settle.
 
-```
-§<role> <id>@<version>[ #<step>][ free text]
-```
-
-- role: `decision`, `invariant`, `edge`, `flow` define; `uses`, `test` refer.
-- id: two or more dot-separated lowercase segments, kebab case inside; the first segment is the domain.
-- version: the entry's current version, starting at 1.
-- `#<step>`: flow anchors only, the number of the step in the entry's `steps:`.
-- Free text after the anchor is a local note about this site.
-- Several anchors can stack above one block, one per comment line.
-- Among JSX children a `//` line is text that renders into the page; write the anchor as a JSX
-  comment there, `{/* §uses teams.invite-link-param-mirrored@1 */}`. Between JSX attributes and in
-  plain code, `//` is fine.
-- `§` followed by a lowercase letter always starts an anchor. Prose that mentions the syntax writes
-  `§<role>`; a file that quotes real-looking anchors as examples (docs about the method, articles) is
-  listed in `logicmap/ignore`, one git pathspec per line, and is not scanned.
-
-An anchor covers its own line when code precedes it (`return null // §edge ...`), otherwise the first
-code line below its comment, plus everything indented under that line and the closing bracket lines
-(`}`, `} else {`, `)`, `> => {`) at its indentation, and after a closing line a deeper line that continues the
-statement (an arrow's body after `}): T =>`, a call chained after `})`). The fingerprint hashes that span, whitespace and comment-only
-lines left out (`//` lines, `/* */` blocks, `# ` and `-- ` lines, `<!--`), so rewording a comment asks no
-ack; a comment after code on its line counts. A code lock line holds `v3:<code>.<shape>`: that
-fingerprint, and the fingerprint of the code's shape, every word that isn't a keyword replaced by its
-order of first appearance, so a rename one for one keeps the shape. A `v2:` line has no shape, and a line
-with no prefix was taken with the comments; an ack renews such lines of its domain whose code is still as
-locked, so nothing is acked unread.
-
-`check` enforces: each `decision`, `invariant` and `edge` id has exactly one defining anchor; each flow
-step has at least one site unless marked `(external)`; every anchor pins the entry's version; the role
-matches the entry's kind; retired ids have no anchors; every active entry has a site; every defining
-anchor's and entry's fingerprint matches the lock; every line an active entry's `grep:` finds, comment
-lines left out, lies under an anchor of that entry. It warns when an `edge` or `invariant` has no `test`
-anchor and no `untested:` field, when the first sentence of an active entry's `what` is over 200
-characters (`long-what`), when git has no PCRE and the `grep:` fields go unchecked
-(`grep-unavailable`), and when git finds a line no pattern matches in JavaScript (`grep-mismatch`).
-
-## Ledger entry
-
-```markdown
-## sync.close-during-join
-kind: edge
-version: 1
-what: The socket can close while joinRoom is still loading the document.
-why: joinRoom adds the connection to the room before it resolves, so a socket that closed meanwhile
-  must be removed when the join lands; otherwise the room keeps it and is never destroyed.
-breaks-if: the closedEarly branch goes → one leaked room per document opened and abandoned mid-load.
-source: the comments in src/sync/ws-routes.ts (commit aafde56)
-history:
-- @1: introduced
-```
-
-- Required: `kind` (`decision` | `invariant` | `edge` | `flow`), `version`, `what`, `why`, `source`.
-- The first sentence of `what` is the claim: the rule itself, in at most 200 characters. It is what
-  `show <domain>` and `show <file>` print for the rule. The detail of the rule may follow it in the same
-  field. A sentence ends at `.`, `!` or `?` before a capital letter or the end of the field, so `e.g.`
-  and `req.ip` do not end it.
-- `source` says where the claim comes from. `inferred — <evidence>` (commits, tests, traced paths)
-  when an agent worked it out from the code; otherwise where a person recorded the intent: a doc, an
-  ADR, a PR or issue, a commit message, `confirmed by <name> <date>`. `show` prints `inferred` or
-  `recorded` beside every entry.
-- Optional: `rejected` (alternative → why not), `breaks-if`, `revisit-if` (the condition that reopens
-  it), `untested` (why no test proves this `edge` or `invariant`: a timing no test can stop at, a check
-  only a person in a browser can make), `grep` (a pattern for the lines that send or read what the rule
-  governs, written in the syntax PCRE and JavaScript share, such as
-  `\b(CLIENT_)?LIVE_EVENT_TYPES\.tagChanged\b`; it needs git built with PCRE), `status` (`active`
-  default, or `retired`), `history`.
-- Flow entries add `steps:`, one `N. text` line per step; append `(external)` to a step with no code in
-  this repo (a user clicking an email link).
-- A line indented under a field continues it. The file is `logicmap/<domain>.md`; the heading is the id.
-- The file opens with `# <domain>` and a short intro, the prose above its first entry: what the domain's
-  rules cover and where its code starts. `show` prints it beside the domain's rule ids.
-
-## Working a task in a mapped repo
-
-A task (a feature step, a bug fix, a refactor) can outlive the session that starts it: the session
-ends or its context is compacted, and the next agent starts with nothing. So the task's state lives in
-a plan file in the repo, and the plan names the rules each step touches.
-
-1. **Plan before code.** Read the code the task touches, then write the plan. A task is a folder, where
-   the repo's agent instructions say; when they name no place, `plans/<NN>-<task-slug>/` at the repo
-   root, holding `00-plan.md` and one doc per step (step 5). Never in `logicmap/`: every
-   `logicmap/*.md` is read as a ledger file. The plan holds the goal (what the user
-   asked, in their words, with the date), numbered steps, and empty `Decisions` and `Revisions`
-   sections. Under each step: checkbox sub-steps, one change you can name each; the files it touches;
-   its rules (next point).
-   Done when every change the task needs has a sub-step and every rule it touches is named in a step.
-2. **Map each step to its rules.** For each file a step touches, run `show <file>`, then `show <id>`
-   for each id in the region the step edits. List them under the step by what the step does to them:
-   - `relies on`: the step must keep the rule true;
-   - `touches`: code under its anchors changes, and `check` will ask whether the rule still holds.
-     When the plan already knows the meaning changes, write `changes <id>@N → @N+1` and list the other
-     sites `show <id>` prints: the step re-verifies each one;
-   - `creates`: a new rule; pick its id and kind now;
-   - `retires`: logic the step deletes.
-
-   A step that holds another process's data (a store, a cache, a list read once) names the messages
-   that change that data and `show`s their rules: a rule with a `grep:` lists every sender and reader,
-   and the step's code becomes one more reader, anchored. A message with no such rule gets one.
-
-   A rule the step relies on that has no entry yet gets a sub-step that maps it. A plan writes ids,
-   never anchors (`access.not-found-not-forbidden@1`, not the `§<role>` form): outside `logicmap/`, a
-   `§` followed by a lowercase letter is scanned as an anchor unless its file is in `logicmap/ignore`.
-3. **Record a decision when the user makes it.** When the user chooses between alternatives, in chat
-   or by answering a question, add it to the plan's `Decisions` at once: the choice, the alternative
-   rejected and why, in their words, with who and when. Its `decision` entry is written in the same
-   change as the code that implements it, with `why` and `rejected` from the plan and `source:
-   confirmed by <name> <date>`. It cannot land earlier: an entry with no anchor fails `check`
-   (`orphan-entry`).
-4. **Work one step at a time.** The change that creates or changes a rule writes or updates its entry
-   and anchors in that same change. Run `check`, resolve every line, tick the sub-step. Keep where the
-   step stands in the plan as it changes (done; half-done and what is left; blocked and on what), not
-   only at the end.
-5. **Record each piece as you write it.** A piece is one function, or one piece of logic inside a
-   function: a query, a changed return value, a rename across its call sites. Before writing it,
-   append its entry to the step's doc (`<NN>-<step-slug>.md` beside the plan), then write exactly that
-   code:
-
-   ````markdown
-   ## Piece 2: the rename route asks canRenameDocument
-   What: PATCH /documents/:id checks canRenameDocument instead of canEditDocument.
-   Why: viewers may rename but not edit. The socket's write flag keeps canEditDocument, so loosening
-     canEditDocument (rejected) would let viewers edit the content over the socket.
-   Where: src/documents/routes.ts:233
-   ```diff
-   -    if (!canEditDocument(resolved.access)) {
-   +    if (!canRenameDocument(resolved.access)) {
-   ```
-   ````
-
-   `Why` says what the piece solves, and names the alternative not taken when there was one. Add to
-   the entry what happened while writing it: a deviation from the code shown, the output of the run
-   that confirmed it. Commit the entry in the same commit as its code: that is what lets `why` on
-   any line lead to the reason it was written (below).
-6. **Revise the plan when a finding changes it.** A finding that changes a step (yours, a review's, a
-   failing test's) changes the plan before more code: edit the steps and their rules, and add a
-   `Revisions` line with the date, what changed, the finding and who found it.
-7. **Close.** `check` exits 0 and every sub-step is ticked or moved by a revision; then commit by the
-   repo's rules.
-
-Resuming a task: read its plan, then `show <id>` for each id it names, then `check`. The first step
-with an unticked sub-step is where the work stands.
-
-Why a line was written, and what it was meant to solve: `why <file>:<line>` follows each commit that
-changed the line to the step doc written with it and the piece in it that holds the line's code or names
-the file: the reason, as the agent that wrote the line recorded it. By hand it is `git log -L <n>,<n>:<file>`,
-`git show --name-only <hash>`, then the doc. `-L` stays inside one file: for code moved from another,
-`git blame -w -C -C -L <n>,<n> <file>` finds the commit that wrote it. A repo that squash-merges keeps one
-commit per branch, holding every piece of the branch; `why` picks the piece holding the line's code. A piece
-describes the code as of its commit: compare it with the code today before repeating it. What must hold now
-is the logicmap entry, which `why` prints first.
-
-The plan of the task that piece 2 above belongs to, `plans/03-viewers-may-rename/00-plan.md`:
-
-```markdown
-# Viewers may rename a document
-
-## Goal
-<name>, 2026-10-14: "viewers should be able to rename a document, not edit it"
-
-## Steps
-### 1. A rename right separate from the edit right
-- [ ] canRenameDocument, true for every access that can read
-- [ ] PATCH /documents/:id asks canRenameDocument; the socket keeps canEditDocument
-Files: src/documents/access.ts, src/documents/routes.ts
-Rules:
-- changes access.rest-and-ws-share-resolver@1 → @2 (rename stops sharing the socket's rule);
-  re-verify src/sync/ws-routes.ts:45, src/sync/ws-routes.ts:67, src/sync/sync.test.ts:343
-- relies on access.not-found-not-forbidden@1
-- creates access.rename-open-to-readers (decision)
-
-## Decisions
-- 2026-10-14, <name>: rename gets its own rule; loosening canEditDocument was rejected because
-  viewers would also edit the content over the socket
-
-## Revisions
-```
+- Anchor: `§<role> <id>@<version>` in a comment, plus ` #<step>` on a flow's anchors. `decision`, `invariant`,
+  `edge` and `flow` define a rule; `uses` and `test` refer to one. It covers its own line when code precedes it,
+  otherwise the first code line below it and everything indented under that line.
+- Entry: `## <id>` in `logicmap/<domain>.md`, then `kind:`, `version: 1`, `what:`, `why:`, `source:`, one field per
+  line; a flow adds `steps:`. The first sentence of `what` is the claim: the rule itself, as its sites hold it,
+  in at most 200 characters. `source:` opens with `inferred` and the evidence when you worked the why out from
+  the code; otherwise it names where a person recorded it (a doc, a commit message, a comment stating the why).
+- An `edge` or `invariant` with no `test` anchor warns until it has one, or an `untested:` field saying why no
+  test can prove it. Warnings leave `check`'s exit at 0; errors do not.
+- `§` followed by a lowercase letter always starts an anchor. Prose about the method writes `§<role>` or the bare
+  id; a file that quotes anchors goes in `logicmap/ignore`.
 
 ## The hook (Claude Code)
 
-`scripts/hook.ts` puts the map in front of the agent without being asked, in every repo with a
-`logicmap/` folder (anywhere else it prints nothing):
+With `scripts/hook.ts` installed, lines opening with `logicmap:` arrive after a tool call, in any repo with a
+`logicmap/` folder:
 
-- after a `Read`, the rules covering the lines read, with their claims and covered lines: in full the
-  first time a session reads a rule at its version, then named by id in one line. The first time a
-  session reads a committed code file, one more line: the newest commit of the lines read, the piece
-  recorded with it, and the `why` command for them;
-- after an `Edit`, `MultiEdit` or `Write`, the errors `check` reports in that file, with what to do, and
-  the rules whose `uses` or `test` sites cover the lines changed since HEAD, once per file and session;
-- after a Bash command, whether it succeeded or failed, both of the above: each `sed -n <first>,<last>p <file>`
-  or `cat <file>` in it is answered as a `Read` of those lines, from the directory the command stands in (its
-  `cd`s followed), and each file it changed, written during its run and differing from HEAD, as an edit. Reading
-  with `sed` and writing with a script keep the map in front of the agent as `Read` and `Edit` do; a `grep`, or a
-  range written with shell variables, is not a read;
-- after a compaction, what the session was shown once (a rule in full, a file's newest change, a rule relied
-  on) is shown again;
-- at `Stop`, `check`'s errors, once, for a session that changed a file in the repo since its last stop:
-  the agent resolves them, or tells the user why they stay. A session that only read is not asked, so one
-  session's work in progress does not stop the others.
+- after code is read (the Read tool, or `sed -n <first>,<last>p <file>` or `cat <file>` in a Bash command): the
+  rules covering those lines, in full the first time in a session (a subagent has its own) and by id after that,
+  and the newest commit of the lines;
+- after a file is changed (Edit, Write, or a Bash command): the errors `check` reports in it, and the rules its
+  `uses` and `test` sites rely on;
+- at the end of a turn: `check`'s errors, for a session that changed a file in the repo.
 
-Install it once, in `~/.claude/settings.json` (merge into the `hooks` already there):
+The hook adds to what this file asks and replaces none of it: run `show <id>` before relying on a rule it names,
+and `check` before a commit. Installing it, and what each event answers: `the-hook.md`.
 
-```json
-{
-  "hooks": {
-    "PostToolUse": [
-      { "matcher": "Read", "hooks": [{ "type": "command", "command": "bun ~/.claude/skills/logicmap/scripts/hook.ts", "timeout": 30 }] },
-      { "matcher": "Edit|MultiEdit|Write", "hooks": [{ "type": "command", "command": "bun ~/.claude/skills/logicmap/scripts/hook.ts", "timeout": 30 }] },
-      { "matcher": "Bash", "hooks": [{ "type": "command", "command": "bun ~/.claude/skills/logicmap/scripts/hook.ts", "timeout": 30 }] }
-    ],
-    "PostToolUseFailure": [
-      { "matcher": "Bash", "hooks": [{ "type": "command", "command": "bun ~/.claude/skills/logicmap/scripts/hook.ts", "timeout": 30 }] }
-    ],
-    "PostCompact": [
-      { "hooks": [{ "type": "command", "command": "bun ~/.claude/skills/logicmap/scripts/hook.ts", "timeout": 30 }] }
-    ],
-    "Stop": [
-      { "hooks": [{ "type": "command", "command": "bun ~/.claude/skills/logicmap/scripts/hook.ts", "timeout": 30 }] }
-    ]
-  }
-}
-```
+## The rest of the method
 
-A Bash command that exits non-zero fires `PostToolUseFailure` only, which is why the hook is installed on both.
-A command that reads and changes nothing costs one `git status`; the repo is analysed only when a file was read or
-changed.
+Each is a file beside this one, read at the moment named:
 
-The hook adds to what the protocol asks; it does not replace it. Run `show <id>` before relying on a rule
-the hook names, and `check` before a commit.
-
-## Setting it up in a repo
-
-1. Create `logicmap/` and map the 3 to 10 places agents most often get wrong: the cross-file rules,
-   the fences, the flows nobody can trace. Open each `<domain>.md` with `# <domain>` and its intro. In a codebase whose reasons are not written down, follow
-   `mapping-an-existing-repo.md`.
-2. `ack` every id; `check` exits 0.
-3. Add this to the repo's agent instructions (`AGENTS.md`, `CLAUDE.md`), so agents without this skill
-   can read the map:
-
-   ```markdown
-   ## Logicmap
-   Comments of the form `§<role> <id>@<version>` anchor code to entries in `logicmap/<domain>.md` (the
-   rule, why, the rejected alternatives, what breaks). `logicmap` below means
-   `bun ~/.claude/skills/logicmap/scripts/logicmap.ts`, run from anywhere in the repo.
-   - On a cold start, `logicmap show`: every domain and its rule ids. Before editing or explaining
-     anchored code: `logicmap show <file>` (or `<file>:<start>-<end>`), then `logicmap show <id>` for
-     each id you touch (its entry and every anchored site, flow steps in order).
-   - After editing: `logicmap check`, and resolve each line it prints (`logicmap diff <id>` shows what
-     changed under its sites): `logicmap ack <id>` when the entry still holds; when its meaning changed, bump the entry's `version`, re-verify every site `check` then
-     reports as `stale-pin`, move those pins, and ack. `renamed` lists the words renamed: when none now
-     points at another thing, `logicmap ack --renamed`. `unanchored-match` is a line naming what a rule's
-     `grep:` looks for, under no anchor of the rule: anchor it.
-   - Roles: `decision`, `invariant`, `edge`, `flow` define a rule; `uses`, `test` point at one. Files
-     that only talk about anchors go in `logicmap/ignore`. The full method: the `logicmap` skill.
-   - Why code is as it is: `logicmap why <file>:<line>` (or `<file>:<start>-<end>`, `<file>:<name>`, `<id>`):
-     the rules over the lines, then every commit that changed them with the piece recorded with it. Run
-     it before changing code you didn't write, and first when debugging.
-   - A task starts with a plan (in `plans/<NN>-<task-slug>/` unless this file names another place):
-     numbered steps, each listing the logicmap ids it relies on, changes, creates or retires. A
-     decision the user makes goes into the plan at once, and into its entry with the code that
-     implements it. Each piece of code is recorded in its step's doc (`## Piece N`: what, why, where,
-     the code) and committed with it, so `logicmap why` leads from a line to why it was written.
-   - An entry whose `source:` starts with `inferred` is an agent's reading of the code, not a recorded
-     decision: when you repeat its why, say it is inferred and cite the evidence.
-   ```
-
-4. For CI or a pre-commit hook, copy `scripts/logicmap.ts` to `logicmap/logicmap.ts` (the ledger
-   folder is never scanned, so the script's own message templates are not read as anchors) and run
-   `bun logicmap/logicmap.ts check` there.
+- `anchors-and-entries.md`: before the first anchor or entry you write in a session. The anchor grammar and what
+  an anchor covers, the ledger entry's fields, what `check` enforces.
+- `working-a-task.md`: before the plan of a task (a feature step, a bug fix, a refactor, mapping an area) in a
+  mapped repo whose agent instructions give no task steps of their own, and when resuming one. The plan and the
+  rules each step names, recording a decision, recording each piece so `why` leads to it.
+- `mapping-an-existing-repo.md`: before an entry for code whose reasons nobody wrote down.
+- `the-hook.md`: to install the hook, or when a line it prints is unclear.
+- `setting-up-a-repo.md`: to start a `logicmap/` in a repo.
