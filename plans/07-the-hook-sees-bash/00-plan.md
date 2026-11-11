@@ -73,8 +73,8 @@ Seam: `respondToHook` with `hook_event_name: 'PostCompact'`.
 
 ### 5. Installed and measured
 - [x] SKILL.md "The hook" and README: Bash, the failure event, the compaction; the settings to install.
-- [ ] `~/.claude/settings.json`: `PostToolUse` and `PostToolUseFailure` for Bash, `PostCompact`.
-- [ ] Measured in teamabled: the time one Bash hook run adds; a read and an edit through Bash seen in a session.
+- [x] `~/.claude/settings.json`: `PostToolUse` and `PostToolUseFailure` for Bash, `PostCompact`.
+- [x] Measured in teamabled: the time one Bash hook run adds; a read and an edit through Bash seen in a session.
 Files: `SKILL.md`, `README.md`
 
 ## Revisions

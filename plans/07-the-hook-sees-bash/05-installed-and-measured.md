@@ -24,3 +24,19 @@ What: the worktree's hook run by hand in teamabled (765 entries), one input per 
 Why: the hook now runs after every Bash command. One that touches no file pays `bun`'s start, one `git rev-parse` and
 one `git status`; the analysis (0.3 to 0.5 s) is paid only by a command that read or changed a file, as a Read or
 an Edit pays it today.
+
+## Piece 3: installed, and seen in a session
+What: `~/.claude/settings.json` gains the hook under `PostToolUse` (matcher `Bash`), `PostToolUseFailure` (matcher
+`Bash`) and `PostCompact`; the branch is fast-forwarded into the installed clone first, since that is the file the
+settings run.
+Why: a hook that is written and not installed answers nothing.
+Seen in the session that wrote it (Claude Code 2.1.321 reloads the settings' hooks while it runs):
+- `sed -n 1,80p src/sync/doc-room.ts | grep ...` in teamabled: `PostToolUse:Bash hook additional context:
+  logicmap: last changed by 5fc52fd3 on 2026-11-09, ... logicmap why src/sync/doc-room.ts:1-80 ...`.
+- in a scratch mapped repo, one command that rewrote `src/room.ts` with a Python script, printed it with
+  `sed -n 2,5p` and exited 1: `PostToolUseFailure:Bash hook additional context:` the rule covering lines 2-5
+  (`sync.close-during-join@1 ... 2-5  §edge  changed`), the lines' newest change, and
+  `src/room.ts:2: error changed: the code under §edge sync.close-during-join@1 changed since the last ack`.
+The compaction was seen in a headless session (`claude -p`, then `claude -c -p "/compact"`): `PreCompact`,
+`PostCompact` and `SessionStart` with `source: compact` fired with one session id; the reset itself is the test of
+step 4.
