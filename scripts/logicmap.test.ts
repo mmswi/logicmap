@@ -2682,4 +2682,32 @@ describe('hook', () => {
       respondToHook({ hook_event_name: 'Stop', session_id: sessionId, cwd: repoRoot }),
     ).toMatchObject({ decision: 'block' })
   })
+
+  test('a cat that writes a file is no read of it; a read whose errors go elsewhere still is', () => {
+    const repoRoot = createMappedRepo()
+    const sessionId = `redirected-${crypto.randomUUID()}`
+    const contextOfCommand = (command: string): string | null => {
+      const hookOutput = respondToHook({
+        hook_event_name: 'PostToolUse',
+        session_id: sessionId,
+        cwd: repoRoot,
+        tool_name: 'Bash',
+        tool_input: { command },
+        duration_ms: 12,
+      })
+      return hookOutput !== null && 'hookSpecificOutput' in hookOutput
+        ? hookOutput.hookSpecificOutput.additionalContext
+        : null
+    }
+
+    expect(contextOfCommand("cat > src/room.ts <<'CODE'")).toBeNull()
+    expect(contextOfCommand("cat <<'CODE' > src/room.ts")).toBeNull()
+    expect(contextOfCommand('cat src/room.ts >> src/copy.ts')).toBeNull()
+    expect(contextOfCommand('cat src/room.ts 2>/dev/null')).toContain(
+      'sync.close-during-join@1  edge  recorded  The socket can close while the join is loading.',
+    )
+    expect(contextOfCommand('sed -n 2,5p src/room.ts 2>/dev/null')).toBe(
+      'logicmap: these lines of src/room.ts are covered too by rules shown earlier this session: sync.close-during-join@1',
+    )
+  })
 })

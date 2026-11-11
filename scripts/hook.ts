@@ -472,6 +472,9 @@ const QUOTED_WORD_PATTERN = /^(['"])(.*)\1$/
 // The lines sed -n prints: `40,60p`, or `40p` for one line.
 const SED_PRINTED_LINES_PATTERN = /^(\d+)(?:,(\d+))?p$/
 const HOME_PATH_START = '~/'
+// `2>/dev/null`, `2>&1`: where a command's errors go changes nothing of what it prints.
+const ERRORS_REDIRECT_PATTERN = /^2>/
+const REDIRECT_PATTERN = /[<>]/
 
 type CommandRead = { filePath: string; readLines: LineRange | null }
 
@@ -489,10 +492,13 @@ const walkCommand = (
   const directories = [cwd]
   const reads: CommandRead[] = []
   for (const segment of command.split(COMMAND_SEPARATOR_PATTERN)) {
-    const [program, ...programArguments] = segment
+    const [program, ...typedArguments] = segment
       .trim()
       .split(/\s+/)
       .map((shellWord) => shellWord.replace(QUOTED_WORD_PATTERN, '$2'))
+    const programArguments = typedArguments.filter(
+      (typedArgument) => !ERRORS_REDIRECT_PATTERN.test(typedArgument),
+    )
     const currentDirectory = directories.at(-1) ?? cwd
     const [firstArgument = '', secondArgument = '', thirdArgument = ''] = programArguments
     const [, firstLineText, lastLineText = firstLineText] =
@@ -506,7 +512,10 @@ const walkCommand = (
     const isCatOfFiles =
       program === 'cat' &&
       programArguments.length > 0 &&
-      programArguments.every((programArgument) => !programArgument.startsWith('-'))
+      programArguments.every(
+        (programArgument) =>
+          !programArgument.startsWith('-') && !REDIRECT_PATTERN.test(programArgument),
+      )
     if (isDirectoryChange) {
       directories.push(toAbsolutePath(currentDirectory, firstArgument))
     }

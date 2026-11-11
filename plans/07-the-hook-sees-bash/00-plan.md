@@ -77,4 +77,16 @@ Seam: `respondToHook` with `hook_event_name: 'PostCompact'`.
 - [x] Measured in teamabled: the time one Bash hook run adds; a read and an edit through Bash seen in a session.
 Files: `SKILL.md`, `README.md`
 
+### 6. A `cat` that writes a file is no read of it
+- [x] Red: `cat > <file> <<'CODE'` and `cat <<'CODE' > <file>` say nothing; a read followed by `2>/dev/null` is
+  still a read.
+- [x] Green: a redirect of the errors is dropped from a segment's arguments; a `cat` with `<` or `>` among them
+  is no read.
+Files: `scripts/hook.ts`, `scripts/logicmap.test.ts`
+Seam: `respondToHook` with `tool_name: 'Bash'`.
+
 ## Revisions
+- 2026-11-11, the agent (seen in the session that wrote the hook, building a scratch repo with
+  `cat > src/session.ts <<'CODE'`): the hook answered each written file as a read of it, with its rules and its
+  newest change. Decision 3 counted a heredoc's lines as the cost of the naive cut and missed that the `cat` holding
+  the heredoc names a real file. Step 6 added.
